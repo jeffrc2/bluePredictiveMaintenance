@@ -3,10 +3,13 @@ import FIFO::*;
 import BRAM::*;
 import BRAMFIFO::*;
 
+
+typedef enum {WRITE, READ} State deriving(Bits,Eq);
+
 interface WeightMem4Ifc;
 	method Action writeWeight(Bit#(14) addr, Bit#(16) data, Bit#(2) ramID, Bit#(4) bytemask);
-	method Action readWeight(Bit#(14) addr);
-	method ActionValue#(Bit#(8)) resp;
+	method Action reqWeight(Bit#(14) addr, Bit#(2) netType);
+	method ActionValue#(Tuple2#(Bit#(64), Bit#(2))) recvWeight;
 	
 	
 endinterface
@@ -19,24 +22,51 @@ module mkWeightMem4(WeightMem4Ifc);
 	Spram256KAIfc ramC <- mkSpram256KA;
 	Spram256KAIfc ramO <- mkSpram256KA;
 	
-	FIFO#(Bit#(8)) relayUart <- mkFIFO;
+	FIFO#(Bit#(2)) relayQ <- mkFIFO;
 	
-	rule ttt;
-		let d <- ramI.resp;
-		let e <- ramF.resp;
-		let f <- ramC.resp;
-		let g <- ramO.resp;
-		d = d - e;
-		f = f - g;
-		let h = d - f;
-		relayUart.enq(truncate(h));
+	FIFO#(Tuple2#(Bit#(64), Bit#(2))) outputQ <- mkFIFO;
+	
+	Reg#(Bool) readReady <- mkReg(False);
+	
+	Reg#(State) ramState <- mkReg(WRITE);
+	Reg#(Bit#(16)) d <- mkReg(0);
+
+	rule transfer;//(readReady == True);
+		let i <- ramI.resp;
+		let f <- ramF.resp;
+		let c <- ramC.resp;
+		let o <- ramO.resp;
+		d <= i;
+		Bit#(64) set;
+		set[63:48] = i;
+		set[47:32] = f;
+		set[31:16] = c;
+		set[15:0] = o;
+	
+		Tuple2#(Bit#(64), Bit#(2)) weights = tuple2(set, relayQ.first);
+		relayQ.deq;
+		outputQ.enq(weights);
+		readReady <= False;
+		$display("transfer check");
 	endrule
 	
-	method Action readWeight(Bit#(14) addr);
-		ramI.req(addr, ?, True, 4'b1111);
-		ramF.req(addr, ?, True, 4'b1111);
-		ramC.req(addr, ?, True, 4'b1111);
-		ramO.req(addr, ?, True, 4'b1111);
+	method Action reqWeight(Bit#(14) addr, Bit#(2) netType);
+
+		ramI.req(addr, ?, False, ?);
+		ramF.req(addr, ?, False, ?);
+		ramC.req(addr, ?, False, ?);
+		ramO.req(addr, ?, False, ?);
+		relayQ.enq(netType);
+		$display("req check 3");
+		$display("%u", addr);
+		//readReady <= True;
+	endmethod
+	
+	method ActionValue#(Tuple2#(Bit#(64), Bit#(2))) recvWeight;
+		outputQ.deq;
+		$display("recv check");
+		return outputQ.first;
+		
 	endmethod
 	
 	method Action writeWeight(Bit#(14) addr, Bit#(16) data, Bit#(2) ramID, Bit#(4) bytemask);
@@ -48,10 +78,5 @@ module mkWeightMem4(WeightMem4Ifc);
 		endcase
 	endmethod
 	
-	method ActionValue#(Bit#(8)) resp;
-		relayUart.deq;
-		let d = relayUart.first;
-		return d;
-	endmethod
 	
 endmodule : mkWeightMem4
