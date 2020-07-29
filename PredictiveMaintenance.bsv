@@ -42,17 +42,6 @@ module mkPredictiveMaintenance(PredictiveMaintenanceIfc);
 		Reg#(Bool) loadComplete <- mkReg(False);
 		
 		Reg#(Bit#(8)) temporaryInputReg <- mkReg(0);
-
-		Bit#(16) lstm1KernelLen = 10000;
-		Bit#(16) lstm1RecurrentLen = 40000;
-		Bit#(16) lstm1BiasLen = 400;
-		Bit#(16) lstm2KernelLen = 20000;
-		Bit#(16) lstm2RecurrentLen = 10000;
-		Bit#(16) lstm2BiasLen = 200;
-		Bit#(16) denseKernelLen = 50;
-		Bit#(16) denseBiasLen = 1;
-		
-		
 		
 		FIFOF#(Bit#(8)) uartOutQ <- mkSizedFIFOF(2);
 		
@@ -68,30 +57,62 @@ module mkPredictiveMaintenance(PredictiveMaintenanceIfc);
 		
 		rule lstmRequest(loadComplete == True && reqProcessing == False && (lstm1.requestQueued || lstm2.requestQueued || dense.requestQueued));
 			if (dense.requestQueued) begin
+				`ifdef BSIM
+				$display("denseRequest");
+				`endif
 				Bit#(14) reqAddr <- lstm2.getRequest;
-				weightMem4.reqWeight(reqAddr, 0);
+				weightMem4.reqWeight(reqAddr, 2);
 				reqProcessing <= True;
 			end
 			else if (lstm2.requestQueued) begin
+				`ifdef BSIM
+				$display("lstm2Request");
+				`endif
 				Bit#(14) reqAddr <- lstm2.getRequest;
-				weightMem4.reqWeight(reqAddr, 0);
+				weightMem4.reqWeight(reqAddr, 1);
 				reqProcessing <= True;
 			end
 			else if (lstm1.requestQueued) begin
+				`ifdef BSIM
+				$display("lstm1Request");
+				`endif
 				Bit#(14) reqAddr <- lstm1.getRequest;
-				weightMem4.reqWeight(reqAddr, 1);
+				weightMem4.reqWeight(reqAddr, 0);
 				reqProcessing <= True;
 			end
 			
 		endrule
 		
 		rule memRead(loadComplete == True && reqProcessing == True);
+			`ifdef BSIM
+			$display("memRead");
+			`endif
+			
+			
 			Tuple2#(Bit#(64), Bit#(2)) weights <- weightMem4.recvWeight;
-			$display("read check");
+			Bit#(64) wt = tpl_1(weights);
 			case (tpl_2(weights)) matches 
-				0: lstm1.processWeight(tpl_1(weights));
-				1: lstm2.processWeight(tpl_1(weights));
+				0: begin
+					lstm1.processWeight(wt);
+					`ifdef BSIM
+					$display("lstm1");
+					`endif
+				end
+				1: begin
+					lstm2.processWeight(wt);
+					`ifdef BSIM
+					$display("lstm2");
+					`endif
+				end
+				2: begin
+					dense.processWeight(wt);
+					`ifdef BSIM
+					$display("dense");
+					`endif
+				end
 			endcase
+			
+			
 			reqProcessing <= False;
 		endrule
 		
@@ -99,27 +120,42 @@ module mkPredictiveMaintenance(PredictiveMaintenanceIfc);
 			lstm2.start;
 			Int#(8) out <- lstm1.getOutput;
 			lstm2.processInput(out);
+			`ifdef BSIM
+			$display("relay12");
+			`endif
 		endrule
 		
 		rule lstm2DenseRelay(lstm2.outputQueued);
 			dense.start;
 			Int#(8) out <- lstm2.getOutput;
-			dense.processInput(out);			
+			dense.processInput(out);	
+			`ifdef BSIM
+			$display("relay2Dense");
+			`endif
 		endrule
 		
 		rule denseUartRelay(dense.outputQueued);
 			Int#(8) out <- dense.getOutput;
 			uartOutQ.enq(pack(out));
+			`ifdef BSIM
+			$display("relayDenseUart");
+			`endif
 		endrule
 		
 		
 		method Action transmitInput(Bit#(8) data);
+			`ifdef BSIM
+			$display("transmitInput %u", data);
+			`endif
 			lstm1.processInput(unpack(data));
 		endmethod
 		
         method Action transmitWeight(Bit#(8) data);
+			`ifdef BSIM
+			$display("transmitWeight %u", data);
+			`endif
 			Bit#(4) bytemask = 4'b1111;
-			Bit#(16) maskeddata = ?;
+			Bit#(16) maskeddata = 0;
 			//Bit#(8) filler = 0;
 			case (maskState) matches
 				UPPER: begin
@@ -139,7 +175,7 @@ module mkPredictiveMaintenance(PredictiveMaintenanceIfc);
 					weightMem4.writeWeight(pack(weight_addr), maskeddata, 2'b01, bytemask);
 				end
 				CANDIDATE: begin
-					weightMem4.writeWeight(pack(weight_addr), maskeddata, 2'b01, bytemask);
+					weightMem4.writeWeight(pack(weight_addr), maskeddata, 2'b10, bytemask);
 				end
 				OUTPUT: begin
 					weightMem4.writeWeight(pack(weight_addr), maskeddata, 2'b11, bytemask);
@@ -147,20 +183,52 @@ module mkPredictiveMaintenance(PredictiveMaintenanceIfc);
 			endcase
 			
 			Bit#(16) sectionLen = 0;
+			
+			Bit#(16) lstm1KernelLen = 10000;
+			Bit#(16) lstm1RecurrentLen = 40000;
+			Bit#(16) lstm1BiasLen = 400;
+			Bit#(16) lstm2KernelLen = 20000;
+			Bit#(16) lstm2RecurrentLen = 10000;
+			Bit#(16) lstm2BiasLen = 200;
+			Bit#(16) denseKernelLen = 50;
+			Bit#(16) denseBiasLen = 1;
+			
+			Bit#(14) new_addr = weight_addr+1;
+			Bit#(14) sectionStart = 0;
+			
 			case (layerState) matches
 				LSTM_1: begin
 					case (weightState) matches
-						KERNEL: sectionLen = lstm1KernelLen/4;
-						RECURRENT: sectionLen = lstm1RecurrentLen/4;
-						BIAS: sectionLen = lstm1BiasLen/4;
-						
+						KERNEL: begin
+							sectionLen = lstm1KernelLen/4;
+							sectionStart = 0;
+						end
+						RECURRENT: begin
+							sectionLen = lstm1RecurrentLen/4;
+							sectionStart = truncate(lstm1KernelLen/8);
+						end
+						BIAS: begin
+							sectionLen = lstm1BiasLen/4;
+							sectionStart = truncate(lstm1KernelLen/8 + lstm1RecurrentLen/8);
+						end
 					endcase
+					
 				end
 				LSTM_2: begin
+				
 					case (weightState) matches
-						KERNEL: sectionLen = lstm2KernelLen/4;
-						RECURRENT: sectionLen = lstm2RecurrentLen/4;
-						BIAS: sectionLen = lstm2BiasLen/4;
+						KERNEL: begin
+							sectionLen = lstm2KernelLen/4;
+							sectionStart = truncate(lstm1KernelLen/8 + lstm1RecurrentLen/8 + lstm1BiasLen/8);
+						end
+						RECURRENT: begin
+							sectionLen = lstm2RecurrentLen/4;
+							sectionStart = truncate(lstm1KernelLen/8 + lstm1RecurrentLen/8 + lstm1BiasLen/8 + lstm2KernelLen/8);
+						end
+						BIAS: begin
+							sectionLen = lstm2BiasLen/4;
+							sectionStart = truncate(lstm1KernelLen/8 + lstm1RecurrentLen/8 + lstm1BiasLen/8 + lstm2KernelLen/8 + lstm2RecurrentLen/8);
+						end
 					endcase
 				end
 				DENSE: begin
@@ -173,16 +241,39 @@ module mkPredictiveMaintenance(PredictiveMaintenanceIfc);
 			
 			//Load State Machine
 			if (loadCounter == truncate(sectionLen) - 1) begin
+				
 				Subweight subUpdate = subweightState;
 				Weight wtUpdate = weightState;
 				Layer layerUpdate = layerState;
 				Bool loadUpdate = loadComplete;
 				if (layerState != DENSE) begin
 					case (subweightState) matches
-						INPUT: subUpdate = FORGET;
-						FORGET: subUpdate = CANDIDATE;
-						CANDIDATE: subUpdate = OUTPUT;
+						INPUT: begin
+							subUpdate = FORGET;
+							new_addr = sectionStart;
+							`ifdef BSIM
+								$display("I weights loaded");
+							`endif
+						end
+						FORGET: begin
+							subUpdate = CANDIDATE;
+							new_addr = sectionStart;
+							`ifdef BSIM
+								$display("F weights loaded");
+							`endif
+						end
+						CANDIDATE: begin
+							subUpdate = OUTPUT;	
+							new_addr = sectionStart;
+							`ifdef BSIM
+								$display("C weights loaded");
+							`endif
+						end
 						OUTPUT: begin
+							`ifdef BSIM
+								$display("O weights loaded");
+							`endif
+							
 							subUpdate = INPUT;
 							case (weightState) matches
 								KERNEL: wtUpdate = RECURRENT;
@@ -191,13 +282,16 @@ module mkPredictiveMaintenance(PredictiveMaintenanceIfc);
 							endcase
 							case (layerState) matches
 								LSTM_1: begin
-									layerUpdate = LSTM_2; 
+									layerUpdate = LSTM_2;
+									`ifdef BSIM
 									$display("LSTM_1 loaded");
+									`endif
 								end
 								LSTM_2: begin
 									layerUpdate = DENSE; 
+									`ifdef BSIM
 									$display("LSTM_2 loaded");
-									
+									`endif
 								end
 							endcase
 						end
@@ -211,7 +305,9 @@ module mkPredictiveMaintenance(PredictiveMaintenanceIfc);
 							wtUpdate = INIT;
 							subUpdate = INIT;
 							loadUpdate = True;
+							`ifdef BSIM
 							$display("DENSE loaded");
+							`endif
 							lstm1.start;
 						end
 					endcase
@@ -221,21 +317,23 @@ module mkPredictiveMaintenance(PredictiveMaintenanceIfc);
 				weightState <= wtUpdate;
 				layerState <= layerUpdate;
 				loadComplete <= loadUpdate;
-
 			end
 			else loadCounter <= loadCounter + 1;
-			
-			//alternate bytemask
-			//increase addr every other.
 			if (layerState != DENSE) begin
 				case (maskState) matches
 					UPPER: maskState <= LOWER;
 					LOWER: begin
 						maskState <= UPPER;
-						weight_addr <= weight_addr + 1;
+						weight_addr <= new_addr;
 					end
 				endcase
-			end else weight_addr <= weight_addr + 1;
+			end else weight_addr <= new_addr;
+
+			//alternate bytemask
+			//increase addr every other.
+			
+			
+			
         endmethod
 		
 		method Bool loadStatus;

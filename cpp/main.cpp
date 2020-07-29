@@ -195,23 +195,23 @@ void send_array(value* val_array, size_t len)
 }
 
 
-void send_array_reorder(value* val_array, size_t len, size_t units, size_t in_width)
-{
-	printf("Re-ordering and Sending Array...");
+// void send_array_reorder(value* val_array, size_t len, size_t units, size_t in_width)
+// {
+	// printf("Re-ordering and Sending Array...");
 
-	for (size_t i = 0; i < 4; i++)
-	{
-		for (size_t j = 0; j < units; j++) 
-		{
-			for (size_t k = 0; k < in_width; k++)
-			{
-				uart_send(val_array[k*units+j]);
-			}
-		}
-	}	
+	// for (size_t i = 0; i < 4; i++)
+	// {
+		// for (size_t j = 0; j < units; j++) 
+		// {
+			// for (size_t k = 0; k < in_width; k++)
+			// {
+				// uart_send(val_array[k*units+j]);
+			// }
+		// }
+	// }	
 	
-	printf("Array sent.\n");
-}
+	// printf("Array sent.\n");
+// }
 
 
 
@@ -318,11 +318,11 @@ void* hwmain(void* arg) {
 
 	printf("Transmitting weights...\n");
 
-	send_array_reorder(lstm_1_kernel_array, 10000, 100, 25);
-	send_array_reorder(lstm_1_recurrent_kernel_array, 40000, 100, 100);
+	send_array(lstm_1_kernel_array, 10000);//, 100, 25);
+	send_array(lstm_1_recurrent_kernel_array, 40000);//, 100, 100);
 	send_array(lstm_1_bias_array, 400);
-	send_array_reorder(lstm_2_kernel_array, 20000, 50, 100);
-	send_array_reorder(lstm_2_recurrent_kernel_array, 10000, 50, 50);
+	send_array(lstm_2_kernel_array, 20000);//, 50, 100);
+	send_array(lstm_2_recurrent_kernel_array, 10000);//, 50, 50);
 	send_array(lstm_2_bias_array, 200);
 	send_array(dense_1_kernel_array, 50);
 	send_array(dense_1_bias_array, 1);

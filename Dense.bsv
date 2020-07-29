@@ -116,7 +116,9 @@ module mkDense(DenseIfc#(height, bias, offset));
 			denseStage <= KERNEL;
 			reqStage <= KERNEL;
 			state <= CALC;
-			$display("start check");
+			`ifdef BSIM
+			$display("dense start");
+			`endif
 		end
 	endmethod 
 	

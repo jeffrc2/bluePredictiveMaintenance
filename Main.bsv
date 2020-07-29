@@ -19,14 +19,17 @@ module mkMain(MainIfc);
 	PredictiveMaintenanceIfc predictiveMaintenance <- mkPredictiveMaintenance;
 	
 	FIFO#(Bit#(8)) uartQ <- mkSizedFIFO(2);
-
-
+	
+	Reg#(int) counter <- mkReg(0);
+	
+	rule count;
+		counter <= counter + 1;
+	endrule
 	
 	rule relayUart(predictiveMaintenance.uartOutReady);
 		Bit#(8) out <- predictiveMaintenance.uartOut;
 		uartQ.enq(out);
 	endrule
-	
 	
 	method ActionValue#(Bit#(8)) uartOut;
 		uartQ.deq;

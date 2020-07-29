@@ -64,14 +64,19 @@ module mkLSTM(LSTMIfc#(height, in_width, hidden_width, unit, offset));
 	FIFOF#(Int#(8)) outputQ <- mkSizedFIFOF(2);
 	
 	
-	rule reqRAM(reqStage != INIT && reqStage != FIN && reqQ.notFull);
+	rule reqRAM(reqStage != INIT && reqStage != FIN && !reqQ.notEmpty);
+		`ifdef BSIM
+		$display("reqRAM");
+		`endif
+		
 		Bit#(14) unit = fromInteger(valueOf(unit));
 		Bit#(14) in_width = fromInteger(valueOf(in_width));
 		Bit#(14) hidden_width = fromInteger(valueOf(hidden_width));
 		Bit#(14) height = fromInteger(valueOf(height));
 		Bit#(14) offset = fromInteger(valueOf(offset));
 		if (reqStage == INPUT) begin
-			Bit#(14) req_addr = offset + width_counter*unit + unit_counter;
+			
+			Bit#(14) req_addr = offset + (width_counter*unit/2) + unit_counter/2;
 			reqQ.enq(req_addr);
 			if (unit_counter < unit - 2) unit_counter <= unit_counter + 2;//extracting two at a time.
 			else begin 
@@ -84,7 +89,7 @@ module mkLSTM(LSTMIfc#(height, in_width, hidden_width, unit, offset));
 			end
 		end
 		else if (reqStage == HIDDEN) begin
-			Bit#(14) req_addr = offset + (unit*in_width/2) + width_counter*unit + unit_counter;
+			Bit#(14) req_addr = offset + (unit*in_width/2) + (width_counter*unit/2) + unit_counter/2;
 			reqQ.enq(req_addr);
 			if (unit_counter < unit - 2) unit_counter <= unit_counter + 2;
 			else begin 
@@ -98,7 +103,7 @@ module mkLSTM(LSTMIfc#(height, in_width, hidden_width, unit, offset));
 			end
 		end
 		else if (reqStage == BIAS) begin
-			Bit#(14) req_addr = offset + (unit*in_width/2) + (unit*hidden_width/2) +  width_counter*100 + unit_counter;
+			Bit#(14) req_addr = offset + (unit*in_width/2) + (unit*hidden_width/2) +  (width_counter*unit/2) + unit_counter/2;
 			reqQ.enq(req_addr);
 			if (unit_counter < unit - 2) unit_counter <= unit_counter + 2;
 			else begin
@@ -112,17 +117,17 @@ module mkLSTM(LSTMIfc#(height, in_width, hidden_width, unit, offset));
 				end
 			end
 		end	
-		
-		$display("req check");
 		spramReqReady <= False;
 	endrule	
 	
 	
 	function Int#(8) quantizedMult(Int#(8) x, Int#(8) y);
+		
 		Int#(16) sx = signExtend(x);
 		Int#(16) sy = signExtend(y); 
 		let p = sx * sy;
 		let s = p / invscale;
+		
 		return truncate(s + zeropoint);
 	endfunction
 
@@ -137,6 +142,7 @@ module mkLSTM(LSTMIfc#(height, in_width, hidden_width, unit, offset));
 	endfunction
 		
 	function Int#(8) hardSigmoid(Int#(8) d);
+
 		Int#(8) lowerlimit = -1;//-2.5f
 		Int#(8) upperlimit = 1;//2.5f
 		Int#(8) onepoint = 102; //1.0f
@@ -148,8 +154,9 @@ module mkLSTM(LSTMIfc#(height, in_width, hidden_width, unit, offset));
 	endfunction	
 	
 	rule calculate1(state == CALC && lstmStage != FIN && spramQ.notEmpty);
-		
-		$display("calculating \n");
+		`ifdef BSIM
+		$display("calculate \n");
+		`endif
 		Bit#(64) weights = spramQ.first;
 		
 		spramQ.deq;
@@ -384,8 +391,9 @@ module mkLSTM(LSTMIfc#(height, in_width, hidden_width, unit, offset));
 	endrule
 	
 	rule calculate2(state == READ ); //set up bram read requests
-	
-		$display("calculating2 \n");
+		`ifdef BSIM
+		$display("calculate2");
+		`endif
 		Bit#(8) nextCounter = lstm_unit_counter;
 		Bit#(8) archCounter = lstm_width_counter;
 		Bit#(8) totalCounter = lstm_height_counter;
@@ -416,7 +424,9 @@ module mkLSTM(LSTMIfc#(height, in_width, hidden_width, unit, offset));
 				end else begin
 					nextState = EXPORT;
 					totalCounter = totalCounter + 1;
+					`ifdef BSIM
 					$display("Iteration: %u", lstm_height_counter);
+					`endif
 					bram_hidden.a.put(False, 0, ?);
 				end
 				nextCounter = 0;
@@ -462,7 +472,9 @@ module mkLSTM(LSTMIfc#(height, in_width, hidden_width, unit, offset));
 	endrule
 	
 	rule calculate3(state == EXPORT);
-		
+		`ifdef BSIM
+		$display("calculate3");
+		`endif
 		let hidden_a = unpack(bram_hidden.a.read);
 		outputQ.enq(hidden_a);
 		if (unit_counter < fromInteger(valueOf(unit))) begin
@@ -472,14 +484,22 @@ module mkLSTM(LSTMIfc#(height, in_width, hidden_width, unit, offset));
 			state <= CALC;
 			unit_counter <= 0;
 		end
+		
+		
 	endrule
 	
 	method Action processWeight(Bit#(64) weights);
 		spramQ.enq(weights);
+		`ifdef BSIM
+		$display("processWeight %u", weights);
+		`endif
 	endmethod
 	
 	method Action processInput(Int#(8) in);
 		inputQ.enq(in);
+		`ifdef BSIM
+		$display("processInput %d", in);
+		`endif
 	endmethod
 		
 	method Action start;
@@ -487,7 +507,9 @@ module mkLSTM(LSTMIfc#(height, in_width, hidden_width, unit, offset));
 			lstmStage <= INPUT;
 			reqStage <= INPUT;
 			state <= CALC;
-			$display("start check");
+			`ifdef BSIM
+			$display("lstm start");
+			`endif
 		end
 	endmethod 
 	
