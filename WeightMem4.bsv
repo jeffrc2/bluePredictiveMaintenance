@@ -7,37 +7,39 @@ import BRAMFIFO::*;
 typedef enum {WRITE, READ} State deriving(Bits,Eq);
 
 interface WeightMem4Ifc;
-	method Action writeWeight(Bit#(14) addr, Bit#(16) data, Bit#(2) ramID, Bit#(4) bytemask);
-	method Action reqWeight(Bit#(14) addr, Bit#(2) netType);
-	method ActionValue#(Tuple2#(Bit#(64), Bit#(2))) recvWeight;
-	
-	
+	method Action writeWeight(Bit#(14) addr, Bit#(16) data, Bit#(2) ramID, Bit#(4) bytemask); //Write a weight into half of the space depending on the bytemask
+	method Action reqWeight(Bit#(14) addr, Bit#(2) netType); //Put a weight request into the SPRAM, with an accompanying network ID
+	method ActionValue#(Tuple2#(Bit#(64), Bit#(2))) recvWeight; //Retrieve a weight, along with an accompanying network ID
 endinterface
 
 module mkWeightMem4(WeightMem4Ifc);
 	Clock curclk <- exposeCurrentClock;
 
+	//SPRAMs for corresponding I,F,C,O weights
 	Spram256KAIfc ramI <- mkSpram256KA;
 	Spram256KAIfc ramF <- mkSpram256KA;
 	Spram256KAIfc ramC <- mkSpram256KA;
 	Spram256KAIfc ramO <- mkSpram256KA;
 	
+	//relay queue holds onto the network ID
 	FIFO#(Bit#(2)) relayQ <- mkFIFO;
 	
+	//output queue holds requested weight data until released by reqWeight
 	FIFO#(Tuple2#(Bit#(64), Bit#(2))) outputQ <- mkFIFO;
 	
-	Reg#(Bool) readReady <- mkReg(False);
+	//readReady
+	//Reg#(Bool) readReady <- mkReg(False);
 	
-	Reg#(State) ramState <- mkReg(WRITE);
-	Reg#(Bit#(16)) d <- mkReg(0);
+	//Reg#(Bit#(16)) d <- mkReg(0);
 
+	//Rule retrieves all SPRAM outputs and wraps them and associated network for retrieval.
 	rule transfer;//(readReady == True);
 		
 		let i <- ramI.resp;
 		let f <- ramF.resp;
 		let c <- ramC.resp;
 		let o <- ramO.resp;
-		d <= i;
+		//d <= i;
 		Bit#(64) set;
 		set[63:48] = i;
 		set[47:32] = f;
@@ -50,11 +52,11 @@ module mkWeightMem4(WeightMem4Ifc);
 		$display("transfer %u %u %u %u %u %u", i, f, c, o, relayQ.first);
 		`endif
 		outputQ.enq(weights);
-		readReady <= False;
+		//readReady <= False;
 	endrule
 	
+	//Method sends request address to all 4 SPRAMs and the network ID for retrieval
 	method Action reqWeight(Bit#(14) addr, Bit#(2) netType);
-
 		ramI.req(addr, ?, False, ?);
 		ramF.req(addr, ?, False, ?);
 		ramC.req(addr, ?, False, ?);
@@ -66,6 +68,7 @@ module mkWeightMem4(WeightMem4Ifc);
 		//readReady <= True;
 	endmethod
 	
+	//Retrieve a completed weight request's weights and network ID
 	method ActionValue#(Tuple2#(Bit#(64), Bit#(2))) recvWeight;
 		outputQ.deq;
 		`ifdef BSIM
@@ -75,6 +78,7 @@ module mkWeightMem4(WeightMem4Ifc);
 		
 	endmethod
 	
+	//Writes a weight into 1 of 4 SPRAM modules based on the provided ramID
 	method Action writeWeight(Bit#(14) addr, Bit#(16) data, Bit#(2) ramID, Bit#(4) bytemask);
 		`ifdef BSIM
 		$display("writeWeight addr: %u ramID: %u data: %u, bytemask: %u", addr, ramID, data, bytemask);

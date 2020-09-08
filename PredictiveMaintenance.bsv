@@ -10,51 +10,49 @@ import LSTM::*;
 //import Dense::*;
 
 
-typedef enum {INIT, LOAD,INPUT} State deriving(Bits,Eq);
+//typedef enum {INIT, LOAD,INPUT} State deriving(Bits,Eq);
 typedef enum {INIT, LSTM_1, LSTM_2, DENSE} Layer deriving(Bits,Eq);
 typedef enum {INIT, KERNEL, RECURRENT, BIAS} Weight deriving(Bits,Eq);
 typedef enum {INIT, INPUT, FORGET, CANDIDATE, OUTPUT, DENSE} Subweight deriving(Bits,Eq);
 typedef enum {UPPER, LOWER} Mask deriving(Bits,Eq);
 
 interface PredictiveMaintenanceIfc;
-        method Action transmitWeight(Bit#(8) data);
-		method Action transmitInput(Bit#(8) data);
-		method Bool uartStatus;
-        method Bit#(3) rgbOut;
-		method Bool loadStatus;
+        method Action transmitWeight(Bit#(8) data); //send weight to LSTM1/LSTM2/Dense
+		method Action transmitInput(Bit#(8) data); //send input to LSTM1
+		method Bool uartStatus; //check availability of uart
+        method Bit#(3) rgbOut; //Output of RGB
+		method Bool loadStatus; //Load status of weights into SPRAM
 		
-		method Bool uartOutReady;
-		method ActionValue#(Bit#(8)) uartOut;
+		method Bool uartOutReady; //Output status of PredictiveMaintenance
+		
+		method ActionValue#(Bit#(8)) uartOut; //Retrieve output of PredictiveMaintenance
 endinterface
 
 module mkPredictiveMaintenance(PredictiveMaintenanceIfc);
 		
-		WeightMem4Ifc weightMem4 <- mkWeightMem4;
+		WeightMem4Ifc weightMem4 <- mkWeightMem4; //Consolidated weight manager
 		
-		Reg#(Bit#(14)) loadCounter <- mkReg(0);
-		Reg#(Bit#(14)) weight_addr <- mkReg(0);
+		Reg#(Bit#(14)) loadCounter <- mkReg(0); //load counter for loading weights 
+		Reg#(Bit#(14)) weight_addr <- mkReg(0); //temporary address manager for storing weights
 		
-		Reg#(State) predictMainState <- mkReg(LOAD);
-		Reg#(Layer) layerState <- mkReg(LSTM_1);
-		Reg#(Weight) weightState <- mkReg(KERNEL);
-		Reg#(Subweight) subweightState <- mkReg(INPUT);
-		Reg#(Mask) maskState <- mkReg(UPPER);
-		Reg#(Bool) loadComplete <- mkReg(False);
+		Reg#(Layer) layerState <- mkReg(LSTM_1); //load layer state
+		Reg#(Weight) weightState <- mkReg(KERNEL); //load layer-weight state
+		Reg#(Subweight) subweightState <- mkReg(INPUT); //load layer-subweight state
+		Reg#(Mask) maskState <- mkReg(UPPER); //load subweight memory mask state
 		
-		Reg#(Bit#(8)) temporaryInputReg <- mkReg(0);
+		Reg#(Bool) loadComplete <- mkReg(False); //load completion status indicator
 		
-		FIFOF#(Bit#(8)) uartOutQ <- mkSizedFIFOF(2);
+		FIFOF#(Bit#(8)) uartOutQ <- mkSizedFIFOF(2); //
 		
-		LSTMIfc#(50, 25, 100, 100, 0) lstm1 <- mkLSTM;
-		LSTMIfc#(50, 100, 50, 50, 6300) lstm2<- mkLSTM; //offset = 10000/8 + 40000/8 + 400/8 = 1250 + 5000 + 50
-		DenseIfc#(50, 1, 10075) dense <- mkDense; //offset = offset1 + 20000/8 + 10000/8 + 200/8 
+		LSTMIfc#(50, 25, 100, 100, 0) lstm1 <- mkLSTM; //LSTM1; memory access offset of 0 as starting point.
 		
-		Reg#(Bool) streamComplete <- mkReg(False);
+		LSTMIfc#(50, 100, 50, 50, 6300) lstm2<- mkLSTM; //LSTM2; memory access offset of 6300 = 1250 + 5000 + 50 = 10000/8 + 40000/8 + 400/8 based on kernel, recurrent, and bias weights of LSTM1
+
+		DenseIfc#(50, 1, 10075) dense <- mkDense; //Dense; memory access offset of offset 10075 = 6300 + 2500 + 1250 + 25 = offset1 + 20000/8 + 10000/8 + 200/8 based on kernel, recurrent, and bias weights of LSTM1 and LSTM2
 		
-		Reg#(Bool) reqProcessing <- mkReg(False);
+		Reg#(Bool) reqProcessing <- mkReg(False); //Request status - indicates ongoing memory request
 		
-		Reg#(Bit#(14)) testaddr <- mkReg(0);
-		
+		//Rule managing SPRAM requests - Priority order is from last to first.
 		rule lstmRequest(loadComplete == True && reqProcessing == False && (lstm1.requestQueued || lstm2.requestQueued || dense.requestQueued));
 			if (dense.requestQueued) begin
 				`ifdef BSIM
@@ -83,11 +81,11 @@ module mkPredictiveMaintenance(PredictiveMaintenanceIfc);
 			
 		endrule
 		
+		//Rule retrieving requested memory - Retrieves weights from the SPRAM Manager and sends it to the corresponding module
 		rule memRead(loadComplete == True && reqProcessing == True);
 			`ifdef BSIM
 			$display("memRead");
 			`endif
-			
 			
 			Tuple2#(Bit#(64), Bit#(2)) weights <- weightMem4.recvWeight;
 			Bit#(64) wt = tpl_1(weights);
@@ -112,10 +110,10 @@ module mkPredictiveMaintenance(PredictiveMaintenanceIfc);
 				end
 			endcase
 			
-			
 			reqProcessing <= False;
 		endrule
 		
+		//Rule transfers output from lstm1 to lstm2 input queue
 		rule lstm12Relay(lstm1.outputQueued);
 			lstm2.start;
 			Int#(8) out <- lstm1.getOutput;
@@ -125,6 +123,7 @@ module mkPredictiveMaintenance(PredictiveMaintenanceIfc);
 			`endif
 		endrule
 		
+		//Rule transfers output from lstm2 to dense input queue
 		rule lstm2DenseRelay(lstm2.outputQueued);
 			dense.start;
 			Int#(8) out <- lstm2.getOutput;
@@ -134,6 +133,7 @@ module mkPredictiveMaintenance(PredictiveMaintenanceIfc);
 			`endif
 		endrule
 		
+		//Rule transfers output from dense to uart queue.
 		rule denseUartRelay(dense.outputQueued);
 			Int#(8) out <- dense.getOutput;
 			uartOutQ.enq(pack(out));
@@ -142,7 +142,7 @@ module mkPredictiveMaintenance(PredictiveMaintenanceIfc);
 			`endif
 		endrule
 		
-		
+		//Method sends data to LSTM1 input queue
 		method Action transmitInput(Bit#(8) data);
 			`ifdef BSIM
 			$display("transmitInput %u", data);
@@ -150,6 +150,7 @@ module mkPredictiveMaintenance(PredictiveMaintenanceIfc);
 			lstm1.processInput(unpack(data));
 		endmethod
 		
+		//Method sends weight data to SPRAM
         method Action transmitWeight(Bit#(8) data);
 			`ifdef BSIM
 			$display("transmitWeight %u", data);
@@ -157,7 +158,8 @@ module mkPredictiveMaintenance(PredictiveMaintenanceIfc);
 			Bit#(4) bytemask = 4'b1111;
 			Bit#(16) maskeddata = 0;
 			//Bit#(8) filler = 0;
-			case (maskState) matches
+			
+			case (maskState) matches //Sets mask for upper or lower byte of the memory
 				UPPER: begin
 					bytemask = 4'b1100;
 					maskeddata[15:8] = data;
@@ -167,7 +169,7 @@ module mkPredictiveMaintenance(PredictiveMaintenanceIfc);
 					maskeddata[7:0] = data;
 				end
 			endcase
-			case (subweightState) matches
+			case (subweightState) matches //Sends the weight write for the specific weightset to the SPRAM manager
 				INPUT: begin
 					weightMem4.writeWeight(pack(weight_addr), maskeddata, 2'b00, bytemask);
 				end
@@ -182,23 +184,26 @@ module mkPredictiveMaintenance(PredictiveMaintenanceIfc);
 				end
 			endcase
 			
-			Bit#(16) sectionLen = 0;
+			Bit#(16) sectionLen = 0; //Variable tracks the start and end of the current weight section
 			
-			Bit#(16) lstm1KernelLen = 10000;
-			Bit#(16) lstm1RecurrentLen = 40000;
-			Bit#(16) lstm1BiasLen = 400;
-			Bit#(16) lstm2KernelLen = 20000;
-			Bit#(16) lstm2RecurrentLen = 10000;
-			Bit#(16) lstm2BiasLen = 200;
-			Bit#(16) denseKernelLen = 50;
-			Bit#(16) denseBiasLen = 1;
+			//length constants for managing processing
+			Bit#(16) lstm1KernelLen = 10000; //Total LSTM1 kernel weight count
+			Bit#(16) lstm1RecurrentLen = 40000; //Total LSTM1 recurrent weight count
+			Bit#(16) lstm1BiasLen = 400; //Total LSTM1 bias weight count
+			Bit#(16) lstm2KernelLen = 20000; //Total LSTM2 kernel weight count
+			Bit#(16) lstm2RecurrentLen = 10000; //Total LSTM2 recurrent weight count
+			Bit#(16) lstm2BiasLen = 200; //Total LSTM2 bias weight count
+			Bit#(16) denseKernelLen = 50; //Total Dense kernel weight count
+			Bit#(16) denseBiasLen = 1; //Total Dense bias weight count
 			
-			Bit#(14) new_addr = weight_addr+1;
+			Bit#(14) new_addr = weight_addr+1; //increment weight_addr for contiguous weight. (default value only used when processing O weight)
 			Bit#(14) sectionStart = 0;
 			
-			case (layerState) matches
+			case (layerState) matches //Sets the corresponding case according to the network; sectionLen is for counting the streamed weights, sectionStart is for setting the address of the beginning of the section.
+			//Sections: Divide by 4 for the 4 sections, I,F,C,O
+			//Addresses: Divide by 8 because of the additional masked address sharing.
 				LSTM_1: begin
-					case (weightState) matches
+					case (weightState) matches //Sets sectionLen for the corresponding LSTM1 weight space in the SPRAM
 						KERNEL: begin
 							sectionLen = lstm1KernelLen/4;
 							sectionStart = 0;
@@ -216,7 +221,7 @@ module mkPredictiveMaintenance(PredictiveMaintenanceIfc);
 				end
 				LSTM_2: begin
 				
-					case (weightState) matches
+					case (weightState) matches //Sets sectionLen for the corresponding LSTM2 weight space in the SPRAM
 						KERNEL: begin
 							sectionLen = lstm2KernelLen/4;
 							sectionStart = truncate(lstm1KernelLen/8 + lstm1RecurrentLen/8 + lstm1BiasLen/8);
@@ -231,7 +236,7 @@ module mkPredictiveMaintenance(PredictiveMaintenanceIfc);
 						end
 					endcase
 				end
-				DENSE: begin
+				DENSE: begin //Sets sectionLen for the corresponding Dense weight space in the SPRAM
 					case (weightState) matches
 						KERNEL: sectionLen = denseKernelLen;
 						BIAS: sectionLen = denseBiasLen;
@@ -240,14 +245,14 @@ module mkPredictiveMaintenance(PredictiveMaintenanceIfc);
 			endcase
 			
 			//Load State Machine
-			if (loadCounter == truncate(sectionLen) - 1) begin
+			if (loadCounter == truncate(sectionLen) - 1) begin //When the loadCounter reaches current sectionLen it moves to the next weight memory section.
 				
 				Subweight subUpdate = subweightState;
 				Weight wtUpdate = weightState;
 				Layer layerUpdate = layerState;
 				Bool loadUpdate = loadComplete;
 				if (layerState != DENSE) begin
-					case (subweightState) matches
+					case (subweightState) matches // For LSTMs, transfers and sets access to the subsequent weight section. I,F,C,O
 						INPUT: begin
 							subUpdate = FORGET;
 							new_addr = sectionStart;
@@ -298,7 +303,7 @@ module mkPredictiveMaintenance(PredictiveMaintenanceIfc);
 					endcase
 				end
 				else begin
-					case (weightState) matches
+					case (weightState) matches // For Dense, transfers and sets access to bias from kernel, or finishes load if bias' end is reached
 						KERNEL: wtUpdate = BIAS; 
 						BIAS: begin //end of load
 							layerUpdate = INIT;
@@ -312,14 +317,16 @@ module mkPredictiveMaintenance(PredictiveMaintenanceIfc);
 						end
 					endcase
 				end
-				loadCounter <= 0;
+				loadCounter <= 0; //reset loadCounter 
+				
+				//update to the corresponding sections
 				subweightState <= subUpdate;
 				weightState <= wtUpdate;
 				layerState <= layerUpdate;
 				loadComplete <= loadUpdate;
 			end
-			else loadCounter <= loadCounter + 1;
-			if (layerState != DENSE) begin
+			else loadCounter <= loadCounter + 1; //increases load counter for contiguous access.
+			if (layerState != DENSE) begin //Alternate bytemask for weights sharing same address in LSTM layers, keeps it in upper for Dense layer. Updates weight address for every dense weight, or every other LSTM weight.
 				case (maskState) matches
 					UPPER: maskState <= LOWER;
 					LOWER: begin
@@ -331,9 +338,6 @@ module mkPredictiveMaintenance(PredictiveMaintenanceIfc);
 
 			//alternate bytemask
 			//increase addr every other.
-			
-			
-			
         endmethod
 		
 		method Bool loadStatus;
