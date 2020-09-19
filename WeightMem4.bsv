@@ -48,9 +48,9 @@ module mkWeightMem4(WeightMem4Ifc);
 	
 		Tuple2#(Bit#(64), Bit#(2)) weights = tuple2(set, relayQ.first);
 		relayQ.deq;
-		`ifdef BSIM
-		$display("transfer %u %u %u %u %u %u", i, f, c, o, relayQ.first);
-		`endif
+		//`ifdef BSIM
+		//$display("transfer %u %u %u %u %u %u", i, f, c, o, relayQ.first);
+		//`endif
 		outputQ.enq(weights);
 		//readReady <= False;
 	endrule
@@ -62,27 +62,27 @@ module mkWeightMem4(WeightMem4Ifc);
 		ramC.req(addr, ?, False, ?);
 		ramO.req(addr, ?, False, ?);
 		relayQ.enq(netType);
-		`ifdef BSIM
-		$display("reqWeight %u", addr);
-		`endif
+		//`ifdef BSIM
+		//$display("reqWeight %u", addr);
+		//`endif
 		//readReady <= True;
 	endmethod
 	
 	//Retrieve a completed weight request's weights and network ID
 	method ActionValue#(Tuple2#(Bit#(64), Bit#(2))) recvWeight;
 		outputQ.deq;
-		`ifdef BSIM
-		$display("recv check");
-		`endif
+		//`ifdef BSIM
+		//$display("recv check");
+		//`endif
 		return outputQ.first;
 		
 	endmethod
 	
 	//Writes a weight into 1 of 4 SPRAM modules based on the provided ramID
 	method Action writeWeight(Bit#(14) addr, Bit#(16) data, Bit#(2) ramID, Bit#(4) bytemask);
-		`ifdef BSIM
-		$display("writeWeight addr: %u ramID: %u data: %u, bytemask: %u", addr, ramID, data, bytemask);
-		`endif
+		//`ifdef BSIM
+		//$display("writeWeight addr: %u ramID: %u data: %u, bytemask: %u", addr, ramID, data, bytemask);
+		//`endif
 		case (ramID) matches
 			2'b00: ramI.req(addr, data, True, bytemask);
 			2'b01: ramF.req(addr, data, True, bytemask);

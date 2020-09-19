@@ -41,12 +41,14 @@ module mkPredictiveMaintenance(PredictiveMaintenanceIfc);
 		Reg#(Mask) maskState <- mkReg(UPPER); //load subweight memory mask state
 		
 		Reg#(Bool) loadComplete <- mkReg(False); //load completion status indicator
+		//Reg#(Bool) loadComplete <- mkReg(True); //load completion status indicator
 		
-		FIFOF#(Bit#(8)) uartOutQ <- mkSizedFIFOF(2); //
 		
-		LSTMIfc#(50, 25, 100, 100, 0) lstm1 <- mkLSTM; //LSTM1; memory access offset of 0 as starting point.
+		FIFOF#(Bit#(8)) uartOutQ <- mkSizedBRAMFIFOF(2); //
 		
-		LSTMIfc#(50, 100, 50, 50, 6300) lstm2<- mkLSTM; //LSTM2; memory access offset of 6300 = 1250 + 5000 + 50 = 10000/8 + 40000/8 + 400/8 based on kernel, recurrent, and bias weights of LSTM1
+		LSTMIfc#(50, 25, 100, 100, 0, 1) lstm1 <- mkLSTM; //LSTM1; memory access offset of 0 as starting point.
+		
+		LSTMIfc#(50, 100, 50, 50, 6300, 0) lstm2<- mkLSTM; //LSTM2; memory access offset of 6300 = 1250 + 5000 + 50 = 10000/8 + 40000/8 + 400/8 based on kernel, recurrent, and bias weights of LSTM1
 
 		DenseIfc#(50, 1, 10075) dense <- mkDense; //Dense; memory access offset of offset 10075 = 6300 + 2500 + 1250 + 25 = offset1 + 20000/8 + 10000/8 + 200/8 based on kernel, recurrent, and bias weights of LSTM1 and LSTM2
 		
@@ -55,25 +57,25 @@ module mkPredictiveMaintenance(PredictiveMaintenanceIfc);
 		//Rule managing SPRAM requests - Priority order is from last to first.
 		rule lstmRequest(loadComplete == True && reqProcessing == False && (lstm1.requestQueued || lstm2.requestQueued || dense.requestQueued));
 			if (dense.requestQueued) begin
-				`ifdef BSIM
-				$display("denseRequest");
-				`endif
+				//`ifdef BSIM
+				//$display("denseRequest");
+				//`endif
 				Bit#(14) reqAddr <- lstm2.getRequest;
 				weightMem4.reqWeight(reqAddr, 2);
 				reqProcessing <= True;
 			end
 			else if (lstm2.requestQueued) begin
-				`ifdef BSIM
-				$display("lstm2Request");
-				`endif
+				//`ifdef BSIM
+				//$display("lstm2Request");
+				//`endif
 				Bit#(14) reqAddr <- lstm2.getRequest;
 				weightMem4.reqWeight(reqAddr, 1);
 				reqProcessing <= True;
 			end
 			else if (lstm1.requestQueued) begin
-				`ifdef BSIM
-				$display("lstm1Request");
-				`endif
+				//`ifdef BSIM
+				//$display("lstm1Request");
+				//`endif
 				Bit#(14) reqAddr <- lstm1.getRequest;
 				weightMem4.reqWeight(reqAddr, 0);
 				reqProcessing <= True;
@@ -83,18 +85,18 @@ module mkPredictiveMaintenance(PredictiveMaintenanceIfc);
 		
 		//Rule retrieving requested memory - Retrieves weights from the SPRAM Manager and sends it to the corresponding module
 		rule memRead(loadComplete == True && reqProcessing == True);
-			`ifdef BSIM
-			$display("memRead");
-			`endif
+			//`ifdef BSIM
+			//$display("memRead");
+			//`endif
 			
 			Tuple2#(Bit#(64), Bit#(2)) weights <- weightMem4.recvWeight;
 			Bit#(64) wt = tpl_1(weights);
 			case (tpl_2(weights)) matches 
 				0: begin
 					lstm1.processWeight(wt);
-					`ifdef BSIM
-					$display("lstm1");
-					`endif
+					//`ifdef BSIM
+					//$display("lstm1");
+					//`endif
 				end
 				1: begin
 					lstm2.processWeight(wt);
@@ -187,6 +189,21 @@ module mkPredictiveMaintenance(PredictiveMaintenanceIfc);
 			Bit#(16) sectionLen = 0; //Variable tracks the start and end of the current weight section
 			
 			//length constants for managing processing
+			//let lstm1KernelLenDiv4 = 2500;
+			//let lstm1KernelLenDiv8 = 1250;
+			//let lstm1RecurrentLenDiv4 = 10000;
+			//let lstm1RecurrentLenDiv8 = 5000;
+			//let lstm1BiasLenDiv4 = 100;
+			//let lstm1BiasLenDiv8 = 25;
+			//let lstm2KernelLenDiv4 = 5000;
+			//let lstm2KernelLenDiv8 = 2500;
+			//let lstm2RecurrentLenDiv4 = 2500;
+			//let lstm2RecurrentLenDiv8 = 1250;
+			//let lstm2BiasLenDiv4 = 50;
+			//let lstm2BiasLenDiv8 = 25;
+			//let denseKernelLen = 50;
+			//let denseBiasLen = 1;
+			
 			Bit#(16) lstm1KernelLen = 10000; //Total LSTM1 kernel weight count
 			Bit#(16) lstm1RecurrentLen = 40000; //Total LSTM1 recurrent weight count
 			Bit#(16) lstm1BiasLen = 400; //Total LSTM1 bias weight count
@@ -205,10 +222,12 @@ module mkPredictiveMaintenance(PredictiveMaintenanceIfc);
 				LSTM_1: begin
 					case (weightState) matches //Sets sectionLen for the corresponding LSTM1 weight space in the SPRAM
 						KERNEL: begin
+							//sectionLen = 2500;
 							sectionLen = lstm1KernelLen/4;
 							sectionStart = 0;
 						end
 						RECURRENT: begin
+							//sectionLen = lstm1RecurrentLen
 							sectionLen = lstm1RecurrentLen/4;
 							sectionStart = truncate(lstm1KernelLen/8);
 						end

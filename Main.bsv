@@ -26,10 +26,9 @@ module mkMain(MainIfc);
 	rule count;
 		counter <= counter + 1;
 		`ifdef BSIM
-		$display("counter %u", counter);
+		$display("top counter %u", counter);
 		`endif
 	endrule
-	
 	
 	rule relayUart(predictiveMaintenance.uartOutReady);
 		Bit#(8) out <- predictiveMaintenance.uartOut;

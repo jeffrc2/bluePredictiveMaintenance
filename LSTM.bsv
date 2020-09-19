@@ -1,5 +1,6 @@
 import BRAMCore::*;
 import FIFOF::*;
+import BRAMFIFO::*;
 
 //invscale = 102;
 //zeropoint = 0;
@@ -17,9 +18,9 @@ typedef enum {INIT, INPUT, HIDDEN, BIAS, FIN} Stage deriving(Bits,Eq);
 
 typedef enum {INIT, CALC, FIN} State deriving(Bits,Eq);
 
-typedef enum {INPUT1, INPUT2, INPUTFETCH, HIDDEN1, HIDDEN2, HIDDENFETCH, BIAS1, BIAS2, BIAS3, BIAS4, BIAS5, BIAS6, BIAS7, BIASFETCH, FIN} CalcStage deriving(Bits,Eq);
+typedef enum {INPUT1, INPUT2, INPUTFETCH, HIDDEN1, HIDDEN2, HIDDENFETCH, BIAS1, BIAS2, BIAS3, BIAS4, BIAS5, BIAS6, BIAS7, BIASFETCH, RETURN, FIN} CalcStage deriving(Bits,Eq);
 
-interface LSTMIfc#(numeric type height, numeric type in_width, numeric type hidden_width, numeric type unit, numeric type offset);
+interface LSTMIfc#(numeric type height, numeric type in_width, numeric type hidden_width, numeric type unit, numeric type offset, numeric type return_sequence);
 	method Action processInput(Int#(8) in); //Put the input into the input queue.
 	method Action processWeight(Bit#(64) weights); //Put the weights into the weights queue.
 	method Action start; 
@@ -30,7 +31,7 @@ interface LSTMIfc#(numeric type height, numeric type in_width, numeric type hidd
 	method ActionValue#(Int#(8)) getOutput;
 endinterface
 
-module mkLSTM(LSTMIfc#(height, in_width, hidden_width, unit, offset));
+module mkLSTM(LSTMIfc#(height, in_width, hidden_width, unit, offset, return_sequence));
 
 	//QuantArithIfc#(height, in_width, hidden_width, unit, offset) quantArith <- mkQuantArith;
 
@@ -47,6 +48,7 @@ module mkLSTM(LSTMIfc#(height, in_width, hidden_width, unit, offset));
 	Reg#(Bit#(8)) lstm_height_counter <- mkReg(0);//50 for LSTM1&2
 	Reg#(Bit#(8)) lstm_width_counter <- mkReg(0);//25 for input 100 for hidden
 	Reg#(Bit#(8)) lstm_unit_counter <- mkReg(0);//100 / halved because of memory access
+	Reg#(Bit#(8)) lstm_return_counter <- mkReg(0);
 	
 	Reg#(Bit#(64)) input_calc1_x <- mkReg(0);
 	Reg#(Bit#(64)) input_calc1_p <- mkReg(0);
@@ -77,6 +79,8 @@ module mkLSTM(LSTMIfc#(height, in_width, hidden_width, unit, offset));
 	Reg#(Bit#(16)) bias_calc6_o <- mkReg(0);
 	Reg#(Bit#(16)) bias_calc6_ifc <- mkReg(0);
 	
+	Reg#(Int#(8)) bias_relay <- mkReg(0);
+	
 	Reg#(Stage) reqStage <- mkReg(INIT);
 	
 	Reg#(CalcStage) calcStage <- mkReg(INPUT1);
@@ -85,10 +89,10 @@ module mkLSTM(LSTMIfc#(height, in_width, hidden_width, unit, offset));
 	
 	Reg#(State) state <- mkReg(INIT);
 
-	FIFOF#(Bit#(14)) reqQ <- mkSizedFIFOF(2);
-	FIFOF#(Int#(8)) inputQ <- mkSizedFIFOF(2);
-	FIFOF#(Bit#(64)) spramQ <- mkSizedFIFOF(2);
-	FIFOF#(Int#(8)) outputQ <- mkSizedFIFOF(2);
+	FIFOF#(Bit#(14)) reqQ <- mkSizedBRAMFIFOF(2);
+	FIFOF#(Int#(8)) inputQ <- mkSizedBRAMFIFOF(2);
+	FIFOF#(Bit#(64)) spramQ <- mkSizedBRAMFIFOF(2);
+	FIFOF#(Int#(8)) outputQ <- mkSizedBRAMFIFOF(2);
 		
 	Int#(16) invscale = 102;
 	Int#(16) zeropoint = 0;
@@ -102,7 +106,7 @@ module mkLSTM(LSTMIfc#(height, in_width, hidden_width, unit, offset));
 	
 	function Int#(8) quantizedMult(Int#(8) x, Int#(8) y);
 		Int#(16) sx = signExtend(x);
-		Int#(16) sy = signExtend(y); 
+		Int#(16) sy = signExtend(y);
 		let p = sx * sy;
 		let s = p / invscale;
 		return truncate(s + zeropoint);
@@ -117,7 +121,6 @@ module mkLSTM(LSTMIfc#(height, in_width, hidden_width, unit, offset));
 		let s = dx + dy;
 		let s2 = s*2;
 		return truncate(s2 + zeropoint);
-		
 	endfunction
 		
 	function Int#(8) hardSigmoid(Int#(8) d);
@@ -132,18 +135,17 @@ module mkLSTM(LSTMIfc#(height, in_width, hidden_width, unit, offset));
 		else return quantizedAdd(quantizedMult(alpha, d), offset);
 	endfunction	
 	
-	
 	//Rule requesting the next SPRAM weights when the request queue is empty
 	rule reqRAM(reqStage != INIT && reqStage != FIN && !reqQ.notEmpty);
 		`ifdef BSIM
 		$display("reqRAM");
 		`endif
 		
-		Bit#(14) unit = fromInteger(valueOf(unit));
-		Bit#(14) in_width = fromInteger(valueOf(in_width));
-		Bit#(14) hidden_width = fromInteger(valueOf(hidden_width));
-		Bit#(14) height = fromInteger(valueOf(height));
-		Bit#(14) offset = fromInteger(valueOf(offset));
+		let unit = fromInteger(valueOf(unit));
+		let in_width = fromInteger(valueOf(in_width));
+		let hidden_width = fromInteger(valueOf(hidden_width));
+		let height = fromInteger(valueOf(height));
+		let offset = fromInteger(valueOf(offset));
 		
 		//For 50 time steps
 			//Reset stored x and y state
@@ -167,8 +169,6 @@ module mkLSTM(LSTMIfc#(height, in_width, hidden_width, unit, offset));
 						reqStage <= HIDDEN;
 					end else req_input_counter <= req_input_counter + 1;
 				end else req_unit_counter <= req_unit_counter + 2;
-				
-
 			end
 			HIDDEN: begin
 				req_addr = offset + (unit*in_width/2) + (req_width_counter*unit/2) + req_unit_counter/2;
@@ -178,9 +178,7 @@ module mkLSTM(LSTMIfc#(height, in_width, hidden_width, unit, offset));
 						req_width_counter <= 0;
 						reqStage <= BIAS;
 					end else req_width_counter <= req_width_counter + 1;
-				end else req_unit_counter <= req_unit_counter + 2;
-				
-				
+				end else req_unit_counter <= req_unit_counter + 2;	
 			end
 			BIAS: begin
 				Stage next = INPUT;
@@ -201,24 +199,30 @@ module mkLSTM(LSTMIfc#(height, in_width, hidden_width, unit, offset));
 	endrule
 
 	rule fetch(calcStage == INPUTFETCH || calcStage == HIDDENFETCH || calcStage == BIASFETCH);
+		`ifdef BSIM
+		$display("input %u hidden %u bias %u", (INPUTFETCH==calcStage), (HIDDENFETCH==calcStage), (BIASFETCH==calcStage));
+		$display("fetch unit %u input %u hidden %u height %u", lstm_unit_counter, lstm_input_counter, lstm_width_counter, lstm_height_counter);
+		`endif
+		let unit = fromInteger(valueOf(unit));
+		let in_width = fromInteger(valueOf(in_width));
+		let hidden_width = fromInteger(valueOf(hidden_width));
+		let height = fromInteger(valueOf(height));
+		let offset = fromInteger(valueOf(offset));
 		
-		Bit#(8) unit = fromInteger(valueOf(unit));
-		Bit#(8) in_width = fromInteger(valueOf(in_width));
-		Bit#(8) hidden_width = fromInteger(valueOf(hidden_width));
-		Bit#(8) height = fromInteger(valueOf(height));
-		Bit#(8) offset = fromInteger(valueOf(offset));
+		Bit#(8) addrA = lstm_unit_counter + 2;
+		Bit#(8) addrB = lstm_input_counter + 3;
 		
 		case (calcStage) matches
 			INPUTFETCH: begin 
 				CalcStage next = INPUT1;
-				Bit#(8) addrA = lstm_unit_counter + 2;
-				Bit#(8) addrB = lstm_input_counter + 3;
-				if (lstm_unit_counter == unit - 2) begin
 				
+				if (lstm_unit_counter >= unit - 2) begin 
 					addrA = 0;
 					addrB = 1;
 					lstm_unit_counter <= 0;
-					if (lstm_input_counter == in_width - 1) begin //Finished Input sequence set, switch to Hidden sublayer 
+					
+					inputQ.deq;
+					if (lstm_input_counter >= in_width - 1) begin //Finished Input sequence set, switch to Hidden sublayer 
 						lstm_input_counter <= 0;
 						next = HIDDEN1;
 						
@@ -229,7 +233,10 @@ module mkLSTM(LSTMIfc#(height, in_width, hidden_width, unit, offset));
 						
 						bram_hidden.a.put(False, zeroExtend(addrA), ?);
 						
-						inputQ.deq; //current sequence finished, move to next input	
+						`ifdef BSIM
+						$display("switch to hidden");
+						`endif
+						 //current sequence finished, move to next input	
 					end else begin //Finished Input sequence
 						lstm_input_counter <= lstm_input_counter + 1;
 						
@@ -237,8 +244,9 @@ module mkLSTM(LSTMIfc#(height, in_width, hidden_width, unit, offset));
 						bram_x_co.a.put(False, addrA, ?);
 						bram_x_if.b.put(False, addrB, ?);
 						bram_x_co.b.put(False, addrB, ?);
-						
-						
+						`ifdef BSIM
+						$display("increment sequence in input");
+						`endif
 					end
 				end else begin //Continue processing on existing Input sequence
 					lstm_unit_counter <= lstm_unit_counter + 2;
@@ -247,24 +255,28 @@ module mkLSTM(LSTMIfc#(height, in_width, hidden_width, unit, offset));
 					bram_x_co.a.put(False, addrA, ?);
 					bram_x_if.b.put(False, addrB, ?);
 					bram_x_co.b.put(False, addrB, ?);
+					`ifdef BSIM
+					$display("continue on current input");
+					`endif
 				end
 				calcStage <= next;
 		
 			end
 			HIDDENFETCH: begin
 				CalcStage next = HIDDEN1;
-				
-				Bit#(8) addrA = lstm_unit_counter + 2;
-				Bit#(8) addrB = lstm_unit_counter + 3;
-				if (lstm_unit_counter == unit - 2) begin
+				if (lstm_unit_counter >= unit - 2) begin //move to next hidden value, or process existing one
 					
 					addrA = 0;
 					addrB = 1;
 					lstm_unit_counter <= 0;
-					if (lstm_width_counter == hidden_width - 1) begin  //Finished Hidden state set, switch to Bias sublayer 
+					if (lstm_width_counter >= hidden_width - 1) begin  //Finished Hidden state set, switch to Bias sublayer 
+						`ifdef BSIM
+						$display("switch to bias");
+						`endif
+						
 						lstm_width_counter <= 0;
 						next = BIAS1;
-
+						
 						bram_y_if.a.put(False, addrA, ?);
 						bram_y_co.a.put(False, addrA, ?);
 						bram_y_if.b.put(False, addrB, ?);
@@ -274,7 +286,9 @@ module mkLSTM(LSTMIfc#(height, in_width, hidden_width, unit, offset));
 						bram_carry.b.put(False, zeroExtend(addrB), ?);
 						
 					end else begin //Current Hidden value processed, move to next Hidden value
-					
+						`ifdef BSIM
+						$display("move to next hidden value");
+						`endif
 						lstm_width_counter <= lstm_width_counter + 1;
 						bram_hidden.a.put(False, signExtend(lstm_width_counter + 1), ?);
 						
@@ -286,28 +300,31 @@ module mkLSTM(LSTMIfc#(height, in_width, hidden_width, unit, offset));
 					bram_y_co.a.put(False, addrA, ?);
 					bram_y_if.b.put(False, addrB, ?);
 					bram_y_co.b.put(False, addrB, ?);
-					
+					`ifdef BSIM
+					$display("continue processing current hidden value");
+					`endif
 				end
 				calcStage <= next;
 		
 			end
 			BIASFETCH: begin
-				CalcStage next = HIDDEN1;
+				CalcStage next = BIAS1;
 				
-				Bit#(8) addrA = lstm_unit_counter + 2;
-				Bit#(8) addrB = lstm_unit_counter + 3;
-				
-				if (lstm_unit_counter == unit - 2) begin 
+				if (lstm_unit_counter >= unit - 2) begin 
 					next = INPUT1;
 					lstm_unit_counter <= 0;
-					if (lstm_height_counter == height - 1) begin //Finished the entire timestep set
+					if (lstm_height_counter >= height - 1) begin //Finished the entire timestep set
 						//done
 						next = FIN;
 						lstm_height_counter <= 0;
-						
+						`ifdef BSIM
+						$display("finish");
+						`endif
 					end else begin  //Finished with the current timestep, Move to the next time set
 						lstm_height_counter <= lstm_height_counter + 1;
-						
+						`ifdef BSIM
+						$display("increment height");
+						`endif
 					end
 				end else begin //Continue with the current timestep
 					lstm_unit_counter <= lstm_unit_counter + 2;
@@ -324,7 +341,9 @@ module mkLSTM(LSTMIfc#(height, in_width, hidden_width, unit, offset));
 					
 					bram_carry.a.put(False, zeroExtend(addrA), ?);
 					bram_carry.b.put(False, zeroExtend(addrB), ?);
-					
+					`ifdef BSIM
+					$display("increment bias");
+					`endif
 				end
 				calcStage <= next;
 			end
@@ -334,6 +353,9 @@ module mkLSTM(LSTMIfc#(height, in_width, hidden_width, unit, offset));
 
 	//Rule processing input and the the corresponding weights.
 	rule calcInput1(state == CALC && calcStage == INPUT1 && spramQ.notEmpty && inputQ.notEmpty);
+		//`ifdef BSIM
+		//$display("calcInput1 height %u in %u unit %u", lstm_height_counter, lstm_input_counter, lstm_unit_counter);
+		//`endif
 		Bit#(64) weights = spramQ.first;
 		spramQ.deq;
 		
@@ -403,6 +425,9 @@ module mkLSTM(LSTMIfc#(height, in_width, hidden_width, unit, offset));
 	endrule
 	
 	rule calcInput2(calcStage == INPUT2);
+		//`ifdef BSIM
+		//$display("calcInput2");
+		//`endif
 		Bit#(64) x = input_calc1_x;
 		Bit#(64) p = input_calc1_p;
 		
@@ -460,6 +485,9 @@ module mkLSTM(LSTMIfc#(height, in_width, hidden_width, unit, offset));
 	endrule
 	
 	rule calcHidden1(state == CALC && calcStage == HIDDEN1 && spramQ.notEmpty);
+		//`ifdef BSIM
+		//$display("calcHidden1 height %u in %u unit %u", lstm_height_counter, lstm_width_counter, lstm_unit_counter);
+		//`endif
 		Bit#(64) weights = spramQ.first;
 		spramQ.deq;
 		
@@ -540,6 +568,9 @@ module mkLSTM(LSTMIfc#(height, in_width, hidden_width, unit, offset));
 	endrule
 	
 	rule calcHidden2(calcStage == HIDDEN2);
+		//`ifdef BSIM
+		//$display("calcHidden2");
+		//`endif
 		Bit#(64) y = hidden_calc1_y;
 		Bit#(64) p = hidden_calc1_p;
 		
@@ -597,7 +628,9 @@ module mkLSTM(LSTMIfc#(height, in_width, hidden_width, unit, offset));
 	endrule
 	
 	rule calcBias1(state == CALC && calcStage == BIAS1 && spramQ.notEmpty);
-		
+		//`ifdef BSIM
+		//$display("calcBias1 height %u in %u unit %u", lstm_height_counter, lstm_width_counter, lstm_unit_counter);
+		//`endif
 		let x_a_if = bram_x_if.a.read;
 		let x_a_co = bram_x_co.a.read;
 		
@@ -677,6 +710,9 @@ module mkLSTM(LSTMIfc#(height, in_width, hidden_width, unit, offset));
 	endrule
 	
 	rule calcBias2(calcStage == BIAS2);
+		//`ifdef BSIM
+		//$display("calcBias2");
+		//`endif
 		Bit#(32) a = bias_calc1_a;
 		Bit#(32) b = bias_calc1_b;
 		Bit#(64) weights = bias_calc1_wt;
@@ -729,7 +765,9 @@ module mkLSTM(LSTMIfc#(height, in_width, hidden_width, unit, offset));
 	endrule
 	
 	rule calcBias3(calcStage == BIAS3);
-		
+		//`ifdef BSIM
+		//$display("calcBias3");
+		//`endif
 		Bit#(64) s = bias_calc2_s;
 		
 		Int#(8) s_a_i = unpack(s[63:56]);
@@ -770,6 +808,9 @@ module mkLSTM(LSTMIfc#(height, in_width, hidden_width, unit, offset));
 	endrule
 	
 	rule calcBias4(calcStage == BIAS4);
+		//`ifdef BSIM
+		//$display("calcBias4");
+		//`endif
 		Bit#(64) hs = bias_calc3_hs;
 		Bit#(16) c = bias_calc3_c;
 		
@@ -811,6 +852,9 @@ module mkLSTM(LSTMIfc#(height, in_width, hidden_width, unit, offset));
 	endrule
 	
 	rule calcBias5(calcStage == BIAS5);
+		//`ifdef BSIM
+		//$display("calcBias5");
+		//`endif
 		Bit#(16) fprev = bias_calc4_fprev;
 		Int#(8) a_f_prev = unpack(fprev[15:8]);
 		Int#(8) b_f_prev = unpack(fprev[7:0]);
@@ -834,6 +878,9 @@ module mkLSTM(LSTMIfc#(height, in_width, hidden_width, unit, offset));
 	endrule
 	
 	rule calcBias6(calcStage == BIAS6);
+		//`ifdef BSIM
+		//$display("calcBias6");
+		//`endif
 		Bit#(16) ifc = bias_calc5_ifc;
 		Int#(8) a_ifc = unpack(ifc[15:8]);
 		Int#(8) b_ifc = unpack(ifc[7:0]);
@@ -853,6 +900,21 @@ module mkLSTM(LSTMIfc#(height, in_width, hidden_width, unit, offset));
 	endrule
 	
 	rule calcBias7(calcStage == BIAS7);
+		CalcStage next = BIASFETCH;
+		let unit = fromInteger(valueOf(unit));
+		let height = fromInteger(valueOf(height));
+		let return_sequence = fromInteger(valueOf(return_sequence));
+		if ((lstm_unit_counter >= unit - 2) && 
+			(return_sequence == 1 || (return_sequence == 0 && lstm_height_counter >= height - 1))) begin //before every new height iteration if return sequences, otherwise return the final state only
+			
+			next = RETURN;
+		end
+		calcStage <= next;
+	
+		//`ifdef BSIM
+		//$display("calcBias7");
+		//`endif
+		
 		Bit#(16) hs_ifc = bias_calc6_hs_ifc;
 		Int#(8) hs_a_ifc = unpack(hs_ifc[15:8]);
 		Int#(8) hs_b_ifc = unpack(hs_ifc[7:0]);
@@ -869,12 +931,29 @@ module mkLSTM(LSTMIfc#(height, in_width, hidden_width, unit, offset));
 		let b_ifco = quantizedMult(hs_b_o, hs_b_ifc);
 		
 		bram_hidden.a.put(True, zeroExtend(lstm_unit_counter), pack(a_ifc));
-		bram_hidden.b.put(True, zeroExtend(lstm_unit_counter), pack(b_ifc));
+		bram_hidden.b.put(True, zeroExtend(lstm_unit_counter+1), pack(b_ifc));
 		
 		bram_carry.a.put(True, zeroExtend(lstm_unit_counter), pack(a_ifco));
-		bram_carry.b.put(True, zeroExtend(lstm_unit_counter), pack(b_ifco));
+		bram_carry.b.put(True, zeroExtend(lstm_unit_counter+1), pack(b_ifco));
 		
-		calcStage <= BIASFETCH;
+	endrule
+	
+	rule output1(calcStage == RETURN);
+		$display("output1");
+		let unit = fromInteger(valueOf(unit));
+		if (lstm_return_counter == 0) begin
+			bram_hidden.a.put(False, signExtend(lstm_return_counter), ?);
+			lstm_return_counter <= lstm_return_counter + 1;
+		end else begin 
+			Int#(8) dataOut = unpack(bram_hidden.a.read);
+			bram_hidden.a.put(False, signExtend(lstm_return_counter), ?);
+			outputQ.enq(dataOut);
+			if (lstm_return_counter == unit) begin
+				lstm_return_counter <= 0;
+				calcStage <= BIASFETCH;
+			end else lstm_return_counter <= lstm_return_counter + 1;
+			
+		end
 	endrule
 	
 	method Action processWeight(Bit#(64) weights);
