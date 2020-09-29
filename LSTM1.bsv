@@ -15,16 +15,15 @@ import Spram::*;
 typedef enum {UPPER, LOWER} MaskHalf deriving (Bits,Eq);
 
 typedef enum {INIT, 
-	INCREMENT, FETCH, 
-	INPUT_MULT, INPUT_ADD, 
-	HIDDEN_MULT, HIDDEN_ADD, 
-	BIAS1_ADD1, BIAS1_ADD2, BIAS1_HS,
-	BIAS2_Mult,
-	BIAS3_Mult,
-	BIAS4_ADD,
-	BIAS5_HS,
-	BIAS6_Mult,
-	FIN} CalcStage deriving (Bits,Eq);
+//spram-required
+	INPUT, 
+	HIDDEN, 
+	BIAS,
+	ACTIVATE1,
+	ACTIVATE2,
+	ACTIVATE3,
+	ACTIVATE4,
+	ACTIVATE5} Stage deriving (Bits,Eq);
 
 interface LSTM1Ifc;
 	method Action processInput(Bit#(8) in); //Put the input into the input queue.
@@ -40,12 +39,6 @@ endinterface
 module mkLSTM1(LSTM1Ifc);
 
 	LSTM2Ifc lstm2 <- mkLSTM2; 
-	
-	Reg#(CalcStage) calcStage <- mkReg(INIT);
-
-	Reg#(MaskHalf) mask <- mkReg(UPPER);
-	
-	//Reg#(Bit#(11)) input_counter <- mkReg(0);
 
 	FIFOF#(Int#(8)) inputQ <- mkSizedBRAMFIFOF(10);
 	FIFOF#(Int#(8)) outputQ <- mkSizedBRAMFIFOF(2);
@@ -89,26 +82,12 @@ module mkLSTM1(LSTM1Ifc);
 	Spram256KAIfc spram0 <- mkSpram256KA;
 	Spram256KAIfc spram1 <- mkSpram256KA;
 	
-	Reg#(Bit#(15)) spramAddr <- mkReg(0);
-
-	Reg#(Int#(8)) temp <- mkReg(0);
 	
-	BRAM_DUAL_PORT#(Bit#(9), Bit#(8)) bram_x <- mkBRAMCore2(512, False);
-	BRAM_DUAL_PORT#(Bit#(9), Bit#(8)) bram_y <- mkBRAMCore2(512, False);
+	BRAM_DUAL_PORT#(Bit#(9), Bit#(8)) bram_x <- mkBRAMCore2(400, False);
+	BRAM_DUAL_PORT#(Bit#(9), Bit#(8)) bram_y <- mkBRAMCore2(400, False);
 	
 	Reg#(Bool) spramRead <- mkReg(False);
 	Reg#(Bool) bramRead <- mkReg(False);
-	
-	function Int#(8) spramSelect(Bit#(16) spramValuePair);
-		
-		Int#(8) value = 0;
-		case (mask) matches
-			UPPER: value = unpack(spramValuePair[15:8]);
-			LOWER: value = unpack(spramValuePair[7:0]);
-		endcase
-		return value;
-	endfunction
-	
 	
 	function Int#(8) bramRespA(BRAM_DUAL_PORT#(Bit#(9), Bit#(8)) bram);
 		return unpack(bram.a.read);
@@ -119,312 +98,405 @@ module mkLSTM1(LSTM1Ifc);
 	endfunction
 	
 	rule relay(lstm2.outputReady);
+		$display("lstm1 output relay");
 		Int#(8) dataOut <- lstm2.getOutput;
 		outputQ.enq(dataOut);
 	endrule
 	
-	Reg#(Bit#(16)) iteration <- mkReg(0);
-	Reg#(Bit#(9)) access_iteration <- mkReg(0);
-	Reg#(Bit#(9)) unit_iteration <- mkReg(0);
-	Reg#(Bit#(9)) layer_iteration <- mkReg(0);
-	Reg#(Bit#(9)) writeAddr <- mkReg(0);
+	Reg#(Bit#(16)) mainIteration <- mkReg(0);//Range 0-50399 for input/hidden/bias, 50400-50899 for activate1-6
+	Reg#(Bit#(15)) spramAddr <- mkReg(0);//Range 0-25199
 	
-	rule input_QMult(calcStage == INPUT_MULT); //100x4 steps before incrementing 
-		`ifdef BSIM
-			$display("lstm1 input");
-		`endif
-		Bit#(16) valuepair <- spram0.resp;
-		Int#(8) coeff = spramSelect(valuepair);
-		Int#(8) dataIn = inputQ.first;
-		temp <= quantizedMult(coeff, dataIn);
-		calcStage <= INPUT_ADD;
-	endrule
+	Reg#(Bit#(9)) bramAddr <- mkReg(0);//Range 0-399
 	
-	rule input_QAdd(calcStage == INPUT_ADD);
-		
-		Int#(8) aggregate = 0;
-		if  (iteration > 399) begin
-			aggregate = bramRespA(bram_x);
-		end
-		Int#(8) product = temp;
-		bram_x.b.put(True, writeAddr, pack(quantizedAdd(aggregate, product)));
-		calcStage <= INCREMENT;
-	endrule
+	Reg#(Bit#(9)) hiddenAddr <- mkReg(0);//Range 0-99
+	Reg#(Bit#(9)) unitCount <- mkReg(0); //(4*100 = 400 per unit) 0-24 for input, 25-124 for hidden, 125 for bias, (100 count units) 126-130 for activate1-5.
+	Reg#(Bit#(6)) heightCount <- mkReg(0); //Range 0-49
+	//Reg#(Bit#(11)) inputCount <- mkReg(0); //Range 0-1249
 	
-	rule hidden_QMult(calcStage == HIDDEN_MULT);
-		`ifdef BSIM
-			$display("lstm1 hidden");
-		`endif
-		Bit#(16) valuepair = 0; 
-		case (spramAddr[14]) matches
-			0: valuepair <- spram0.resp;
-			1: valuepair <- spram1.resp;
+	Reg#(MaskHalf) incMask <- mkReg(UPPER); 
+	Reg#(MaskHalf) calcMask <- mkReg(UPPER);
+	
+	function Int#(8) spramSelect(Bit#(16) spramValuePair);
+		Int#(8) value = 0;
+		case (calcMask) matches
+			UPPER: value = unpack(spramValuePair[15:8]);
+			LOWER: value = unpack(spramValuePair[7:0]);
 		endcase
-		Int#(8) coeff = spramSelect(valuepair);
-		Int#(8) hiddenIn = 0;
-		if (access_iteration != 0) begin
-			hiddenIn = bramRespA(bram_hidden);
-		end
-		temp <= quantizedMult(coeff, hiddenIn);
-		calcStage <= HIDDEN_ADD;
-	endrule
+		return value;
+	endfunction	
 	
-	rule hidden_QAdd(calcStage == HIDDEN_ADD);
-		Int#(8) aggregate = 0;
-		if (iteration > 10399) begin
-			aggregate = bramRespA(bram_y);
-		end
-		Int#(8) product = temp;
-		bram_x.b.put(True, writeAddr, pack(quantizedAdd(aggregate, product)));
-		calcStage <= INCREMENT;
-	endrule
-	
-	rule bias1_QAdd1(calcStage == BIAS1_ADD1);
-		`ifdef BSIM
-			$display("lstm1 bias1");
-		`endif
-		Int#(8) x = bramRespA(bram_x);
-		Int#(8) y = bramRespA(bram_y);
-		temp <= quantizedAdd(x, y);
-		calcStage <= BIAS1_ADD2;
-	endrule
-	
-	rule bias1_QAdd2(calcStage == BIAS1_ADD2);
-		Bit#(16) valuepair <- spram1.resp;
-		Int#(8) bias = spramSelect(valuepair);
-		Int#(8) sum = temp;
-		temp <= quantizedAdd(bias, sum);
-		calcStage <= BIAS1_HS;
-	endrule
-	
-	rule bias1_HS(calcStage == BIAS1_HS);
-		Int#(8) sum = temp;
-		
-		bram_y.b.put(True, writeAddr, pack(hardSigmoid(sum)));
-		calcStage <= INCREMENT;
-	endrule
-	
-	rule bias2_CMult(calcStage == BIAS2_Mult);
-		`ifdef BSIM
-			$display("lstm1 bias2");
-		`endif
-		Int#(8) c_prev = bramRespA(bram_carry);
-		Int#(8) f = bramRespA(bram_y);
-		bram_carry.b.put(True, writeAddr, pack(quantizedMult(c_prev,f)));
-		calcStage <= INCREMENT;
-	endrule
-	
-	rule bias3_QMult(calcStage == BIAS3_Mult);
-		`ifdef BSIM
-			$display("lstm1 bias3");
-		`endif
-		Int#(8) i = bramRespA(bram_y);
-		Int#(8) c = bramRespB(bram_y);
-		bram_hidden.b.put(True, writeAddr, pack(quantizedMult(i,c)));
-		calcStage <= INCREMENT;
-	endrule
-	
-	rule bias4_QAdd(calcStage == BIAS4_ADD);
-		`ifdef BSIM
-			$display("lstm1 bias4");
-		`endif
-		Int#(8) cf = bramRespA(bram_carry);
-		Int#(8) ic = bramRespA(bram_hidden);
-		bram_carry.b.put(True, writeAddr, pack(quantizedAdd(cf,ic))); //new carry state
-		calcStage <= INCREMENT;
-	endrule
-	
-	rule bias5_HS(calcStage == BIAS5_HS);
-		`ifdef BSIM
-			$display("lstm1 bias5");
-		`endif
-		Int#(8) c_state = bramRespA(bram_carry);
-		bram_hidden.b.put(True, writeAddr, pack(hardSigmoid(c_state)));
-		calcStage <= INCREMENT;
-	endrule
-	
-	Reg#(Bit#(6)) height_count <- mkReg(0);
-	
-	rule bias6_QMult(calcStage == BIAS6_Mult && lstm2.inputReady); //must wait for LSTM2 queue to be empty before allowed to continue.
-		`ifdef BSIM
-			$display("lstm1 bias6");
-		`endif
-		Int#(8) hs = bramRespA(bram_hidden);
-		Int#(8) o = bramRespA(bram_y);
-		let h_state = quantizedMult(hs, o);
-		bram_hidden.b.put(True, writeAddr, pack(h_state)); //new hidden state
-		lstm2.processInput(h_state);
-		lstm2.start;
-		calcStage <= INCREMENT;
-	endrule 
-	
-	rule bias6_QMult_full(calcStage == BIAS6_Mult && !lstm2.inputReady);
-		//not ready for input yet.
-		`ifdef BSIM
-			$display("lstm1 waiting");
-		`endif
-	endrule
-	
+	Reg#(Bit#(9)) writeAddr <- mkReg(0);
 
+	Reg#(Stage) fetchStage <- mkReg(INIT);
+	Reg#(Stage) calcStage <- mkReg(INIT);
 	
-	rule fetcher(calcStage == FETCH); //send fetch requests; 
-		`ifdef BSIM
-			//$display("lstm1 fetch");
-		`endif
-		if (iteration < 10000 ) begin //input calculation requests
-			if (access_iteration == 399) begin //dequeue input
-				inputQ.deq;
-			end
-			
-			Bit#(9) bramAddr1 = access_iteration;
-			writeAddr <= unit_iteration;
-			
-			spram0.req(spramAddr[13:0], ?, False, ?);
-			bram_x.a.put(False, bramAddr1, ?);
-			calcStage <= INPUT_MULT;
-		end
-		else if (iteration >= 10000 && iteration < 50000) begin //hidden calculation requests
-			if (access_iteration == 399) begin //request the next hidden state
-				Bit#(9) bramAddr2 = access_iteration; //possibly incorrect
-				bram_hidden.a.put(False, bramAddr2, ?);
-			end
-			
-			Bit#(9) bramAddr1 = access_iteration;
-			writeAddr <= unit_iteration;
-			case (spramAddr[14]) matches
-				0: spram0.req(spramAddr[13:0], ?, False, ?);
-				1: spram1.req(spramAddr[13:0], ?, False, ?);
-			endcase
-			bram_y.a.put(False, bramAddr1, ?);
-			calcStage <= HIDDEN_MULT;
-		end
-		else if (iteration >= 50000 && iteration < 50400) begin //bias 1 calculation requests
-			writeAddr <= unit_iteration;
-			Bit#(9) bramAddr1 = access_iteration;
-			bram_x.a.put(False, bramAddr1, ?);
-			bram_y.a.put(False, bramAddr1, ?);
-			spram1.req(spramAddr[13:0], ?, False, ?);
-			calcStage <= BIAS1_ADD1;
-		end
-		else if (iteration >= 50400 && iteration < 50500) begin //bias 2 calculation requests
-			writeAddr <= access_iteration;
-			Bit#(9) bramAddr1 = access_iteration + 100;
-			Bit#(9) bramAddr2 = access_iteration;
-			bram_y.a.put(False, bramAddr1, ?);
-			bram_carry.a.put(False, bramAddr2, ?);
-			calcStage <= BIAS2_Mult;
-		end
-		else if (iteration >= 50500 && iteration < 50600) begin //bias 3 calculation requests
-			writeAddr <= access_iteration;
-			Bit#(9) bramAddr1 = access_iteration;
-			Bit#(9) bramAddr2 = bramAddr1 + 200;
-			bram_y.a.put(False, bramAddr1, ?);
-			bram_y.b.put(False, bramAddr2, ?);
-			calcStage <= BIAS3_Mult;
-		end
-		else if (iteration >= 50600 && iteration < 50700) begin //bias 4 calculation requests
-			writeAddr <= access_iteration;
-			
-			Bit#(9) bramAddr1 = access_iteration;
-			bram_carry.b.put(False, bramAddr1, ?);
-			bram_hidden.b.put(False, bramAddr1, ?);
-			calcStage <= BIAS4_ADD;
-		end
-		else if (iteration >= 50700 && iteration < 50800) begin //bias 5 calculation requests 
-			writeAddr <= access_iteration;
-			
-			Bit#(9) bramAddr1 = access_iteration; 
-			bram_carry.a.put(False, bramAddr1, ?);
-			calcStage <= BIAS5_HS;
-		end
-		else if (iteration >= 50800 && iteration < 50900) begin //bias 6 calculation requests
-			writeAddr <= access_iteration;
-			
-			Bit#(9) bramAddr1 = access_iteration;
-			Bit#(9) bramAddr2 = access_iteration + 300;
-			bram_hidden.a.put(False, bramAddr1, ?);
-			bram_y.a.put(False, bramAddr2, ?);
-			calcStage <= BIAS6_Mult;
-		end
-		else calcStage <= INCREMENT;
-	endrule
+	Reg#(Bool) readX <- mkReg(False);
+	Reg#(Bool) readY <- mkReg(False);
+	Reg#(Bool) readHidden <- mkReg(False);
 	
-	rule incrementer(calcStage == INCREMENT); //increment values
+	Reg#(Bool) mainIncrementEN <- mkReg(False);
+	Reg#(Bool) activateIncrementEN <- mkReg(False);
+		
+	rule incrementMain(mainIncrementEN && mainIteration < 50400);
 		`ifdef BSIM
-			//$display("lstm1 increment");
+			//$display("lstm1 increment main");
+			//$display("lstm1 height ", heightCount);
+			//$display("lstm1 iteration ", mainIteration);
 		`endif
-		if (iteration < 50400) begin 
-			//alternate mask/increment spramAddr
-			//input, 10000 iterations (100*25*4)
-				// dequeue an input every 400 iterations (25 dequeues)
+		//alternate mask/increment spramAddr
+			//input, 10000 iterations (25*100*4)
+				
 				// increment bramAddr1/ reset bramAddr1 every 400 iterations(25 resets)
 				//+100 for i
 				//+100 for f
 				//+100 for c
 				//+100 for o
-				// increment writeAddr every 4 iterations/ reset writeAddr every 400 iterations (25 resets)
-			//hidden, 40000 iterations (100*100*4)
-				// increment bramAddr2 every 400 iterations (100 times)
-				// increment bramAddr1/ reset bramAddr1 every 400 iterations(100 resets)
-				//+100 for i 
-				//+100 for f
-				//+100 for c
-				//+100 for o
-				// increment writeAddr every 4 iterations/ reset writeAddr every 400 iterations (100 resets)
-			//bias1, 100 iterations
-			// increment bramAddr1/ reset bramAddr1 at the end
-				//+100 for i
-				//+100 for f
-				//+100 for c
-				//+100 for o
-				// increment writeAddr every 4 iterations/ reset writeAddr at the end
 				
-			iteration <= iteration + 1;
-			
-			if (access_iteration < 399) access_iteration <= access_iteration + 1;
-			else access_iteration <= 0; 
-			
-			if (unit_iteration < 99) begin
-				if (layer_iteration < 3) layer_iteration <= layer_iteration + 1;
-				else begin
-					layer_iteration <= 0;
-					unit_iteration <= unit_iteration + 1;
-				end
-			end
-			else unit_iteration <= 0;
-			
-			case (mask) matches
-				UPPER: begin
-					mask <= LOWER;
-				end
-				LOWER: begin
-					mask <= UPPER;
-					spramAddr <= spramAddr + 1;
-				end
-			endcase
-			calcStage <= FETCH;
+		//increment iteration
+		mainIteration <= mainIteration + 1;
+		
+		//transition stage
+		if (mainIteration == 10000) begin
+			fetchStage <= HIDDEN;
 		end
-		else if (iteration >= 50400 && iteration < 50900) begin //bias cross-layer calculations
-			// bias2 +100 for c_prev & f -> carry // start at 0 for c_prev and at 100 for f
-			//bias3 +100 for i & c -> hidden // start at 0 for i and 200 for c
-			//bias4 +100 for cf(carry) and ic(hidden) -> carry (c_state) //start at 0 for carry and hidden
-			//bias5 +100 for carry (c_state) -> hidden (hs) // start at 0 for carry, same for hidden
-			//bias6 +100 for hidden (hs) -> h_state & export // start at 0 for hidden
-			iteration <= iteration + 1;
-			if (access_iteration < 99) access_iteration <= access_iteration + 1;
-			else access_iteration <= 0; 
-			calcStage <= FETCH;
+		else if (mainIteration == 50000) begin
+			fetchStage <= BIAS;
 		end
+		
+		if (bramAddr < 399) bramAddr <= bramAddr + 1;
 		else begin
-			access_iteration <= 0;
-			iteration <= 0;
-			if (height_count < 50) begin
-				height_count <= height_count + 1;
-				calcStage <= FETCH;
+			bramAddr <= 0;
+			unitCount <= unitCount + 1;
+		end
+		
+		case (incMask) matches
+			UPPER: begin
+				incMask <= LOWER;
 			end
-			else calcStage <= FIN;
+			LOWER: begin
+				incMask <= UPPER;
+				spramAddr <= spramAddr + 1;
+			end
+		endcase
+	endrule
+	
+	rule incrementActivate(mainIncrementEN && mainIteration >= 50400 && mainIteration < 50899);
+		`ifdef BSIM
+			//$display("lstm1 increment activate");
+			//$display("lstm1 height ", heightCount);
+			//$display("lstm1 iteration ", mainIteration);
+		`endif
+		mainIteration <= mainIteration + 1;
+		if (mainIteration < 50500) fetchStage <= ACTIVATE1;
+		else if (mainIteration < 50600) fetchStage <= ACTIVATE2;
+		else if (mainIteration < 50700) fetchStage <= ACTIVATE3;
+		else if (mainIteration < 50800) fetchStage <= ACTIVATE4;
+		else fetchStage <= ACTIVATE5;
+		if (bramAddr < 99) bramAddr <= bramAddr + 1;
+		else begin
+			bramAddr <= 0;
+			unitCount <= unitCount + 1;
 		end
 	endrule
+	
+	rule resetMain(mainIncrementEN && mainIteration == 50899);//reset in the last iteration
+		mainIteration <= 0;
+		spramAddr <= 0;
+		bramAddr <= 0;
+		unitCount <= 0;
+		readX <= False;
+		readY <= False;
+		hiddenAddr <= 0;
+		if (heightCount < 49) begin
+			heightCount <= heightCount + 1;
+			fetchStage <= INPUT;
+		end
+		else begin
+			mainIncrementEN <= False;
+			fetchStage <= INIT;
+			heightCount <= 0;
+
+		end
+	endrule
+	
+	rule cascadeFetchCalc;
+		calcStage <= fetchStage;
+	endrule
+	
+	rule fetchInput(fetchStage == INPUT); //input calculation requests
+		// dequeue an input every 200 iterations (25 dequeues)
+		`ifdef BSIM
+			//$display("lstm1 input fetch");
+		`endif
+		
+		//fetch spram kernel value
+		spram0.req(spramAddr[13:0], ?, False, ?);
+		
+		//fetch a new input at the beginning of each unit after the first, and enable reading BRAM X
+		if (bramAddr == 0 && unitCount != 0) begin //dequeue input
+			if (inputQ.notEmpty) begin
+				inputQ.deq;
+			end else begin
+				$display("inputQ is currently empty ");//, inputCount+1);
+				$finish(0);
+			end
+			readX <= True;
+		end
+		
+		//fetch bram x value
+		bram_x.a.put(False, bramAddr, ?);
+		
+		//update calc parameters
+		calcMask <= incMask;
+		writeAddr <= bramAddr;
+	endrule
+	
+	rule calcInput(calcStage == INPUT); //100x4 steps before incrementing 
+		`ifdef BSIM
+			//$display("lstm1 input");
+		`endif
+
+		//receive bram x value
+		Int#(8) aggregate = 0;
+		if (readX) begin
+			aggregate = bramRespA(bram_x);
+		end
+		//receive spram kernel value
+		Bit#(16) valuepair <- spram0.resp;
+		Int#(8) coeff = spramSelect(valuepair);
+		//receive input value
+		Int#(8) dataIn = inputQ.first;
+		//calculate new x value
+		Int#(8) product = quantizedMult(coeff, dataIn);
+		bram_x.b.put(True, writeAddr, pack(quantizedAdd(aggregate, product)));
+	endrule
+	
+	Reg#(Bit#(1)) spramTop <- mkReg(0);
+	
+	rule fetchHidden(fetchStage == HIDDEN); //input calculation requests
+		// dequeue an input every 400 iterations (25 dequeues)
+		`ifdef BSIM
+			//$display("lstm1 hidden fetch");
+		`endif
+		
+		// fetch spram recurrent value
+		case (spramAddr[14]) matches
+			0: spram0.req(spramAddr[13:0], ?, False, ?);
+			1: spram1.req(spramAddr[13:0], ?, False, ?);
+		endcase
+		
+		spramTop <= spramAddr[14];
+		
+		//fetch bram hidden and y value after the first hidden unit
+		if (heightCount > 0) begin
+			readHidden <= True; //Activates the hidden values after using zeroes initially
+		end
+		if (bramAddr == 399) begin //increment the hidden address
+			hiddenAddr <= hiddenAddr + 1;
+		end
+		bram_hidden.a.put(False, hiddenAddr, ?);
+		
+		if (unitCount > 25) begin //Enables Y bram reads after the initial writes
+			readY <= True;
+		end
+		
+		//fetch bram y value
+		bram_y.a.put(False, bramAddr, ?);
+		
+		//update calc parameters
+		calcMask <= incMask;
+		writeAddr <= bramAddr;
+	endrule
+	
+	rule calcHidden(calcStage == HIDDEN);
+		`ifdef BSIM
+			//$display("lstm1 hidden");
+		`endif
+		
+		//receive bram y value
+		Int#(8) aggregate = 0;
+		if (readY) begin
+			aggregate = bramRespA(bram_y);
+		end
+		//receive spram recurrent value
+		Bit#(16) valuepair = 0; 
+		case (spramTop) matches 
+			0: valuepair <- spram0.resp;
+			1: valuepair <- spram1.resp;
+		endcase
+		Int#(8) coeff = spramSelect(valuepair);
+		
+		//receive stored hidden value
+		Int#(8) hiddenIn = 0;
+		if (readHidden) begin
+			hiddenIn = bramRespA(bram_hidden);
+		end
+		
+		//calculate new y value
+		Int#(8) product = quantizedMult(coeff, hiddenIn);
+		bram_x.b.put(True, writeAddr, pack(quantizedAdd(aggregate, product)));
+	endrule
+
+	
+	rule fetchBias(fetchStage == BIAS); //input calculation requests
+		`ifdef BSIM
+			//$display("lstm1 bias fetch");
+		`endif
+		//fetch bram x value
+		bram_x.a.put(False, bramAddr, ?);
+		//fetch bram y value
+		bram_y.a.put(False, bramAddr, ?);
+		//fetch spram value
+		spram1.req(spramAddr[13:0], ?, False, ?);
+		
+		//update calc parameters
+		calcMask <= incMask;
+		writeAddr <= bramAddr;
+	endrule
+
+	Reg#(Int#(8)) bias <- mkReg(0);
+	Reg#(Int#(8)) bias1 <- mkReg(0);
+	
+	Reg#(Bool) calcBias1 <- mkReg(False); //enables calcBiasZW
+	Reg#(Bool) calcBias2 <- mkReg(False); //enables calcBiasHS
+	
+	Reg#(Bit#(9)) writeAddr1 <- mkReg(0);
+	Reg#(Bit#(9)) writeAddr2 <- mkReg(0);
+	
+	rule calcBiasCascade;//follows fetchStage in a cascaded delay 
+		calcBias1 <= (calcStage == BIAS);
+		calcBias2 <= calcBias1;
+	endrule
+
+	rule calcBiasXY(calcStage == BIAS); 
+		`ifdef BSIM
+			//$display("lstm1 bias");
+		`endif
+		//recieve spram bias value
+		Bit#(16) valuepair <- spram1.resp;
+		bias <= spramSelect(valuepair);
+		
+		//recieve bram X value
+		Int#(8) x = bramRespA(bram_x);
+		//recieve bram Y value
+		Int#(8) y = bramRespA(bram_y);
+		
+		//calculate x + y
+		bias1 <= quantizedAdd(x, y);
+		writeAddr1 <= writeAddr;
+	endrule
+
+	Reg#(Int#(8)) bias2 <- mkReg(0);
+	
+	rule calcBiasZW(calcBias1); //
+		// calculate x + y + bias
+		bias2 <= quantizedAdd(bias1, bias);
+		writeAddr2 <= writeAddr1;
+	endrule
+	
+	rule calcBiasHS(calcBias2);
+		// calculate hard_sigmoid(x + y+ bias)
+		bram_y.b.put(True, writeAddr2, pack(hardSigmoid(bias2)));
+	endrule
+
+	
+	rule fetchActivate1(fetchStage == ACTIVATE1); //bias 2 calculation requests
+		`ifdef BSIM
+			//$display("lstm1 activate1 fetch");
+		`endif
+		writeAddr <= bramAddr;
+		Bit#(9) bramAddr1 = bramAddr*4+1; //F layer
+		Bit#(9) bramAddr2 = bramAddr; //carry_prev
+		bram_y.a.put(False, bramAddr1, ?);//fetch F from bram y
+		bram_carry.a.put(False, bramAddr2, ?);//fetch carry_prev
+	endrule
+	
+	rule calcActivate1(calcStage == ACTIVATE1);
+		`ifdef BSIM
+			//$display("lstm1 activate1");
+		`endif
+		Int#(8) c_prev = bramRespA(bram_carry); //retrieve previous carry
+		Int#(8) f = bramRespA(bram_y); //retrieve f
+		bram_carry.b.put(True, writeAddr, pack(quantizedMult(c_prev,f))); //carry[j] = hard_sigmoid_func(f[j])*carry[j]
+	endrule
+	
+	rule fetchActivate2(fetchStage == ACTIVATE2); //bias 3 calculation requests
+		`ifdef BSIM
+			//$display("lstm1 activate2 fetch");
+		`endif
+		writeAddr <= bramAddr;
+		Bit#(9) bramAddr1 = bramAddr*4; // I layer
+		Bit#(9) bramAddr2 = bramAddr1 + 2; // C layer
+		bram_y.a.put(False, bramAddr1, ?); 
+		bram_y.b.put(False, bramAddr2, ?);
+	endrule
+	
+	rule calcActivate2(calcStage == ACTIVATE2);
+		`ifdef BSIM
+			//$display("lstm1 activate2");
+		`endif
+		Int#(8) i = bramRespA(bram_y); 
+		Int#(8) c = bramRespB(bram_y);
+		bram_hidden.b.put(True, writeAddr, pack(quantizedMult(i,c))); //hidden[j] = hard_sigmoid_func(i[j])*hard_sigmoid_func(c[j])
+	endrule
+	
+	rule fetchActivate3(fetchStage == ACTIVATE3); //bias 4 calculation requests
+		`ifdef BSIM
+			//$display("lstm1 activate3 fetch");
+		`endif
+		writeAddr <= bramAddr;
+		bram_carry.a.put(False, bramAddr, ?); // Fetch F*c_prev
+		bram_hidden.a.put(False, bramAddr, ?);// Fetch I*C
+	endrule
+	
+	rule calcActivate3(calcStage == ACTIVATE3);
+		`ifdef BSIM
+			//$display("lstm1 activate3");
+		`endif
+		Int#(8) cf = bramRespA(bram_carry);
+		Int#(8) ic = bramRespA(bram_hidden);
+		bram_carry.b.put(True, writeAddr, pack(quantizedAdd(cf,ic))); //new carry state: carry[j] = carry[j] + hidden[j]
+	endrule
+	
+	rule fetchActivate4(fetchStage == ACTIVATE4); //bias 5 calculation requests 
+		`ifdef BSIM
+			//$display("lstm1 activate4 fetch");
+		`endif
+		writeAddr <= bramAddr;
+		bram_carry.a.put(False, bramAddr, ?); //Fetch I*F*C*c_prev
+	endrule
+	
+	rule calcActivate4(calcStage == ACTIVATE4);
+		`ifdef BSIM
+			//$display("lstm1 activate4");
+		`endif
+		Int#(8) c_state = bramRespA(bram_carry);
+		bram_hidden.b.put(True, writeAddr, pack(hardSigmoid(c_state))); //hidden[j] = hard_sigmoid(carry[j])
+	endrule
+	
+	
+	rule fetchActivate5(fetchStage == ACTIVATE5); //bias 6 calculation requests
+		`ifdef BSIM
+			//$display("lstm1 activate5 fetch");
+		`endif
+		writeAddr <= bramAddr; 
+		Bit#(9) bramAddr1 = bramAddr; // hard_sigmoid(I*F*C*c_prev)
+		Bit#(9) bramAddr2 = bramAddr*4 + 3; // O layer
+		bram_hidden.a.put(False, bramAddr1, ?); //fetch hard_sigmoid
+		bram_y.a.put(False, bramAddr2, ?); //fetch O layer
+	endrule
+	
+	rule calcActivate5(calcStage == ACTIVATE5);
+		`ifdef BSIM
+			//$display("lstm1 activate5");
+		`endif
+		Int#(8) hs = bramRespA(bram_hidden);
+		Int#(8) o = bramRespA(bram_y);
+		let h_state = quantizedMult(hs, o);
+		bram_hidden.b.put(True, writeAddr, pack(h_state)); //new hidden state: hidden[j] = hidden[j]*o[j];
+		lstm2.processInput(pack(h_state));
+		lstm2.start;
+	endrule 
 	
 	method Action processInput(Bit#(8) in);
 		`ifdef BSIM
@@ -440,14 +512,14 @@ module mkLSTM1(LSTM1Ifc);
 		`endif
 		Bit#(4) bytemask = 4'b1111;
 		Bit#(16) maskeddata = 0;
-		case (mask) matches
+		case (incMask) matches
 			UPPER: begin
-				mask <= LOWER;
+				incMask <= LOWER;
 				bytemask = 4'b1100;
 				maskeddata[15:8] = weight;
 			end
 			LOWER: begin
-				mask <= UPPER;
+				incMask <= UPPER;
 				bytemask = 4'b0011;
 				if (spramAddr < 25199) spramAddr <= spramAddr + 1;
 				else spramAddr <= 0; 
@@ -469,7 +541,7 @@ module mkLSTM1(LSTM1Ifc);
 	endmethod
 	
 	method Bool inputReady;//ready to queue input
-		return !inputQ.notEmpty;
+		return inputQ.notFull;
 	endmethod
 
 	method Bool outputReady;//ready to dequeue output
@@ -478,7 +550,8 @@ module mkLSTM1(LSTM1Ifc);
 	
 	method Action start;
 		if (calcStage == INIT) begin
-			calcStage <= FETCH;
+			mainIncrementEN <= True;
+			fetchStage <= INPUT;
 			`ifdef BSIM
 				$display("lstm1 start");
 			`endif

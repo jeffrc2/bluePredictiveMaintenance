@@ -3,7 +3,9 @@ import FIFOF::*;
 import BRAMCore::*;
 import BRAMFIFO::*;
 
-typedef enum {INIT, FETCH, INCREMENT, INPUT_MULT, INPUT_ADD, BIAS_HS, BIAS_ADD, FIN} CalcStage deriving(Bits,Eq);
+typedef enum {INIT, 
+	INPUT,  
+	BIAS} Stage deriving(Bits,Eq);
 
 
 interface DenseIfc;
@@ -18,47 +20,13 @@ endinterface
 
 module mkDense(DenseIfc);
 	
+	FIFOF#(Int#(8)) inputQ <- mkSizedBRAMFIFOF(50);
+	FIFOF#(Int#(8)) outputQ <- mkSizedBRAMFIFOF(2);
+	
 	Int#(16) invscale = 102;
 	Int#(16) zeropoint = 0;
 	
-	FIFOF#(Int#(8)) inputQ <- mkSizedBRAMFIFOF(2);
-	FIFOF#(Int#(8)) outputQ <- mkSizedBRAMFIFOF(2);
-	
-	
-	Reg#(CalcStage) calcStage <- mkReg(INIT);
-	
-	BRAM_DUAL_PORT#(Bit#(9), Bit#(8)) bram_weights <- mkBRAMCore2(51, False);
-	
-	function Int#(8) bramRespA(BRAM_DUAL_PORT#(Bit#(9), Bit#(8)) bram);
-		return unpack(bram.a.read);
-	endfunction
-	
-	Reg#(Bit#(9)) iteration <- mkReg(0);
-	
-	rule fetch(calcStage == FETCH);
-		`ifdef BSIM
-			//$display("dense fetch");
-		`endif
-		bram_weights.a.put(False, iteration, ?);
-		if (iteration < 50) calcStage <= BIAS_HS;
-		else calcStage <= FIN;
-	endrule
-	
-	rule increment(calcStage == INCREMENT);
-		`ifdef BSIM
-			$display("dense increment");
-		`endif
-		iteration <= iteration + 1;
-		calcStage <= FETCH;
-	endrule
-	
-
-	
-	Reg#(Int#(8)) temp <- mkReg(0);
-	Reg#(Int#(8)) summate <- mkReg(0);
-	
 	function Int#(8) quantizedMult(Int#(8) x, Int#(8) y);
-
 		Int#(16) sx = signExtend(x);
 		Int#(16) sy = signExtend(y);
 		let p = sx * sy;
@@ -87,37 +55,78 @@ module mkDense(DenseIfc);
 		else return quantizedAdd(quantizedMult(alpha, d), offset);
 	endfunction	
 	
-	rule input_QMult(calcStage == INPUT_MULT);
+	BRAM_DUAL_PORT#(Bit#(9), Bit#(8)) bram_weights <- mkBRAMCore2(51, False);
+	
+	function Int#(8) bramRespA(BRAM_DUAL_PORT#(Bit#(9), Bit#(8)) bram);
+		return unpack(bram.a.read);
+	endfunction
+	
+	Reg#(Bit#(9)) mainIteration <- mkReg(0);
+	//Reg#(Bit#(9)) bramAddr <- mkReg(0);//Range 0-50
+	
+	Reg#(Stage) fetchStage <- mkReg(INIT);
+	Reg#(Stage) calcStage <- mkReg(INIT);
+	
+	Reg#(Bool) mainIncrementEN <- mkReg(False);
+	
+	rule cascadeFetchCalc;
+		calcStage <= fetchStage;
+	endrule
+	
+	rule incrementMain(mainIncrementEN && mainIteration < 50);
+		fetchStage <= INPUT;
+		mainIteration <= mainIteration + 1;
+	endrule
+	
+	rule incrementBias(mainIncrementEN && mainIteration == 50);
+		fetchStage <= BIAS;
+		mainIncrementEN <= False;
+	endrule
+	
+	rule fetch_(fetchStage == INPUT || fetchStage == BIAS);
+		`ifdef BSIM
+			$display("dense fetch");
+			$display("iteration ", mainIteration);
+		`endif
+		bram_weights.a.put(False, mainIteration, ?);
+	endrule
+	
+	Reg#(Int#(8)) summate <- mkReg(0);
+	Reg#(Int#(8)) bias <- mkReg(0);
+	
+	Reg#(Bool) calcBias1 <- mkReg(False); //enables calcBiasZW
+	
+	rule calcBiasCascade(calcStage == BIAS);//follows fetchStage in a cascaded delay 
+		calcBias1 <= True;
+	endrule
+	
+	rule calcInput(calcStage == INPUT);
 		`ifdef BSIM
 			$display("dense input");
 		`endif
 		Int#(8) coeff = bramRespA(bram_weights); 
-		Int#(8) dataIn = inputQ.first;
 		inputQ.deq;
-		temp <= quantizedMult(coeff, dataIn);
-		calcStage <= INPUT_ADD;
-	endrule
-	
-	rule input_QAdd(calcStage == INPUT_ADD);
-
-		Int#(8) product = temp;
+		Int#(8) dataIn = inputQ.first;
+		Int#(8) product = quantizedMult(coeff, dataIn);
 		Int#(8) aggregate = summate;
-		temp <= quantizedAdd(aggregate, product);
-		calcStage <= INCREMENT;
+		summate <= quantizedAdd(aggregate, product);
 	endrule
-	
-	rule bias_HS(calcStage == BIAS_HS);
+
+	rule calcBiasHS(calcStage == BIAS);
 	`ifdef BSIM
 			$display("dense bias");
 		`endif
 		summate <= hardSigmoid(summate);
-		calcStage <= BIAS_ADD;
+		bias <= bramRespA(bram_weights);
 	endrule	
 	
-	rule bias_QAdd(calcStage == BIAS_ADD);
-		Int#(8) bias = bramRespA(bram_weights);
+	rule calcBiasAdd(calcBias1);
+		//Int#(8) bias = bramRespA(bram_weights);
 		outputQ.enq(quantizedAdd(bias, summate));
-		calcStage <= FIN;
+		`ifdef BSIM
+			$display("Finished process");
+			$finish(0);
+		`endif
 	endrule
 	
 	Reg#(Bit#(9)) bramWriteAddr <- mkReg(0);
@@ -127,21 +136,27 @@ module mkDense(DenseIfc);
 			$display("processing Dense weight");
 		`endif
 		bram_weights.b.put(True, bramWriteAddr, weight);
-		bramWriteAddr <= bramWriteAddr + 1;
+		if (bramWriteAddr < 50) bramWriteAddr <= bramWriteAddr + 1;
+		else bramWriteAddr <= 0;
 	endmethod
 	
 	method Action processInput(Int#(8) in);
+		`ifdef BSIM
+			$display("processing Dense input");
+		`endif
 		inputQ.enq(in);
+		
 	endmethod
-	
 		
 	method Action start;
-		if (calcStage == INIT) begin
-			calcStage <= FETCH;
-			bram_weights.a.put(False, iteration, ?);
-			`ifdef BSIM
-				$display("dense start");
-			`endif
+		`ifdef BSIM
+			$display("dense start");
+			$finish(0);
+		`endif
+		if (fetchStage == INIT) begin
+			fetchStage <= INPUT;
+			mainIncrementEN <= True;
+			
 		end
 	endmethod 
 	

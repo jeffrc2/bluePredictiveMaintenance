@@ -28,7 +28,7 @@ module mkMain(MainIfc);
 	rule count;
 		counter <= counter + 1;
 		`ifdef BSIM
-		$display("top counter %u", counter);
+			//$display("top counter", counter);
 		`endif
 	endrule
 	
@@ -36,8 +36,6 @@ module mkMain(MainIfc);
 		Int#(8) out <- lstm1.getOutput;
 		uartQ.enq(pack(out));
 	endrule
-	
-
 	
 	Reg#(int) weight_counter <- mkReg(0);
 	Reg#(LoadStage) loadStage <- mkReg(LSTM1);
@@ -83,7 +81,12 @@ module mkMain(MainIfc);
 	
 	method ActionValue#(Bit#(8)) uartOut;
 		uartQ.deq;
+		`ifdef BSIM
+				$display("output given");
+				$finish(0);
+		`endif
 		return uartQ.first;
+		
 	endmethod
 	
 	method Bit#(3) rgbOut;
