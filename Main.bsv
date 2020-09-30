@@ -40,6 +40,7 @@ module mkMain(MainIfc);
 	Reg#(int) weight_counter <- mkReg(0);
 	Reg#(LoadStage) loadStage <- mkReg(LSTM1);
 	
+	
 	//Method transfers data to LSTM1 to be processed as weights until all weights have been processed, then subsequent data is transferred to be processed as input
 	method Action uartIn(Bit#(8) data) if (lstm1.inputReady == True);
 		case (loadStage) matches
@@ -69,7 +70,6 @@ module mkMain(MainIfc);
 			end
 			INPUT: begin
 				lstm1.processInput(data);
-				lstm1.start;
 				if (weight_counter < 1249) weight_counter <= weight_counter + 1;
 				else begin
 					weight_counter <= 0;

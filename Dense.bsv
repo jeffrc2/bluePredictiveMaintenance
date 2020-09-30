@@ -1,5 +1,6 @@
 
 import FIFOF::*;
+import FIFO::*;
 import BRAMCore::*;
 import BRAMFIFO::*;
 
@@ -62,33 +63,43 @@ module mkDense(DenseIfc);
 	endfunction
 	
 	Reg#(Bit#(9)) mainIteration <- mkReg(0);
-	//Reg#(Bit#(9)) bramAddr <- mkReg(0);//Range 0-50
+	Reg#(Bit#(9)) bramAddr <- mkReg(0);//Range 0-50
 	
 	Reg#(Stage) fetchStage <- mkReg(INIT);
+	//FIFO#(Stage) fetchStageQ <- mkFIFO;
 	Reg#(Stage) calcStage <- mkReg(INIT);
 	
 	Reg#(Bool) mainIncrementEN <- mkReg(False);
 	
 	rule cascadeFetchCalc;
 		calcStage <= fetchStage;
+		//fetchStageQ.deq;
+		//calcStage <= fetchStageQ.first;
+		//$display( "going to %d", pack(fetchStage) );
 	endrule
 	
 	rule incrementMain(mainIncrementEN && mainIteration < 50);
 		fetchStage <= INPUT;
+		bramAddr <= mainIteration;
 		mainIteration <= mainIteration + 1;
 	endrule
 	
 	rule incrementBias(mainIncrementEN && mainIteration == 50);
 		fetchStage <= BIAS;
-		mainIncrementEN <= False;
+		mainIteration <= mainIteration + 1;
 	endrule
 	
-	rule fetch_(fetchStage == INPUT || fetchStage == BIAS);
+	rule incrementReset(mainIncrementEN && mainIteration == 51);
+		mainIncrementEN <= False;
+		fetchStage <= INIT;
+	endrule
+	
+	rule fetch(fetchStage == INPUT || fetchStage == BIAS);
 		`ifdef BSIM
 			$display("dense fetch");
 			$display("iteration ", mainIteration);
 		`endif
-		bram_weights.a.put(False, mainIteration, ?);
+		bram_weights.a.put(False, bramAddr, ?);
 	endrule
 	
 	Reg#(Int#(8)) summate <- mkReg(0);
@@ -113,7 +124,7 @@ module mkDense(DenseIfc);
 	endrule
 
 	rule calcBiasHS(calcStage == BIAS);
-	`ifdef BSIM
+		`ifdef BSIM
 			$display("dense bias");
 		`endif
 		summate <= hardSigmoid(summate);
@@ -125,7 +136,7 @@ module mkDense(DenseIfc);
 		outputQ.enq(quantizedAdd(bias, summate));
 		`ifdef BSIM
 			$display("Finished process");
-			$finish(0);
+			//$finish(0);
 		`endif
 	endrule
 	
@@ -151,12 +162,12 @@ module mkDense(DenseIfc);
 	method Action start;
 		`ifdef BSIM
 			$display("dense start");
-			$finish(0);
+			//$finish(0);
 		`endif
 		if (fetchStage == INIT) begin
 			fetchStage <= INPUT;
+			//fetchStageQ.enq(INPUT);
 			mainIncrementEN <= True;
-			
 		end
 	endmethod 
 	
