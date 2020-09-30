@@ -1,0 +1,5 @@
+bsim
+build
+.*.sw?
+*.log
+*.o

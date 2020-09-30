@@ -3,6 +3,7 @@ import FIFOF::*;
 import BRAMFIFO::*;
 import Dense::*;
 import Spram::*;
+import FIFO::*;
 //invscale = 42;
 //zeropoint = 0;
 
@@ -126,6 +127,7 @@ module mkLSTM2(LSTM2Ifc);
 	Reg#(Bit#(9)) writeAddr <- mkReg(0);	
 
 	Reg#(Stage) fetchStage <- mkReg(INIT);
+	FIFO#(Stage) fetchStageQ <- mkFIFO;
 	Reg#(Stage) calcStage <- mkReg(INIT);
 
 	Reg#(Bool) readX <- mkReg(False);
@@ -155,9 +157,11 @@ module mkLSTM2(LSTM2Ifc);
 		//transition stage
 		if (mainIteration == 20000) begin
 			fetchStage <= HIDDEN;
+			fetchStageQ.enq(HIDDEN);
 		end
 		else if (mainIteration == 30000) begin
 			fetchStage <= BIAS;
+			fetchStageQ.enq(BIAS);
 		end
 		if (bramAddr < 199) bramAddr <= bramAddr + 1;
 		else begin
@@ -183,11 +187,27 @@ module mkLSTM2(LSTM2Ifc);
 			//$display("lstm2 iteration ", mainIteration);
 		`endif
 		mainIteration <= mainIteration + 1;
-		if (mainIteration < 30250) fetchStage <= ACTIVATE1;
-		else if (mainIteration < 30300) fetchStage <= ACTIVATE2;
-		else if (mainIteration < 30350) fetchStage <= ACTIVATE3;
-		else if (mainIteration < 30400) fetchStage <= ACTIVATE4;
-		else fetchStage <= ACTIVATE5;
+		if (mainIteration < 30250) begin
+			fetchStage <= ACTIVATE1;
+			fetchStageQ.enq(ACTIVATE1);
+		end
+		else if (mainIteration < 30300) begin
+			fetchStage <= ACTIVATE2;
+			fetchStageQ.enq(ACTIVATE2);
+		end
+		else if (mainIteration < 30350) begin
+			fetchStage <= ACTIVATE3;
+			fetchStageQ.enq(ACTIVATE3);
+		end
+		else if (mainIteration < 30400) begin
+			fetchStage <= ACTIVATE4;
+			fetchStageQ.enq(ACTIVATE4);
+		end
+		else begin
+			fetchStage <= ACTIVATE5;
+			fetchStageQ.enq(ACTIVATE5);
+			$display( "fetch going 5" );
+		end
 		if (bramAddr < 49) bramAddr <= bramAddr + 1;
 		else begin
 			bramAddr <= 0;
@@ -205,6 +225,8 @@ module mkLSTM2(LSTM2Ifc);
 		hiddenAddr <= 0;
 		inputCount <= 0;
 		fetchStage <= INIT;
+		fetchStageQ.enq(INIT);
+
 		mainIncrementEN <= False;
 		if (heightCount < 49) begin
 			heightCount <= heightCount + 1;
@@ -215,7 +237,18 @@ module mkLSTM2(LSTM2Ifc);
 	endrule
 	
 	rule cascadeFetchCalc;
-		calcStage <= fetchStage;
+		//calcStage <= fetchStage;
+		fetchStageQ.deq;
+		calcStage <= fetchStageQ.first;
+		//$display( "going to %d", pack(fetchStage) );
+		/*
+		if ( fetchStage == ACTIVATE5 ) begin
+			$display("going to 5");
+		end
+		if ( fetchStage == ACTIVATE1 ) begin
+			$display("fetch activate 1");
+		end
+		*/
 	endrule
 	
 	rule fetchInput(fetchStage == INPUT); //input calculation requests
@@ -547,6 +580,7 @@ module mkLSTM2(LSTM2Ifc);
 		mainIncrementEN <= True;
 		if (calcStage == INIT) begin
 			fetchStage <= INPUT;
+			fetchStageQ.enq(INPUT);
 			`ifdef BSIM
 				$display("lstm2 start");
 			`endif

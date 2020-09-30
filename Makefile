@@ -33,3 +33,6 @@ bsim: Main.bsv cpp/main.cpp
 program:
 	cd build; apio upload
 
+clean:
+	rm -rf build
+	rm -rf bsim
