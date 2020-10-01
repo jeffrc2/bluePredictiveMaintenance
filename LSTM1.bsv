@@ -125,7 +125,8 @@ module mkLSTM1(LSTM1Ifc);
 		return value;
 	endfunction	
 	
-	Reg#(Bit#(9)) writeAddr <- mkReg(0);
+	FIFOF#(Bit#(9)) writeAddrQ <- mkSizedBRAMFIFOF(3);
+	//Reg#(Bit#(9)) writeAddr <- mkReg(0);
 
 	Reg#(Stage) fetchStage <- mkReg(INPUT);
 	FIFOF#(Stage) fetchStageQ <- mkSizedBRAMFIFOF(3);
@@ -148,7 +149,7 @@ module mkLSTM1(LSTM1Ifc);
 		
 	rule incrementMain(mainIncrementEN && mainIteration < 50400);
 		`ifdef BSIM
-			$display("lstm1 increment main ", mainIteration);
+			$display("lstm1 increment main ", mainIteration, " height ", heightCount);
 		`endif
 		//alternate mask/increment spramAddr
 			//input, 10000 iterations (25*100*4)
@@ -190,7 +191,7 @@ module mkLSTM1(LSTM1Ifc);
 	
 	rule incrementActivate(mainIncrementEN && mainIteration >= 50400 && mainIteration < 50899);
 		`ifdef BSIM
-			$display("lstm1 increment activate ", mainIteration);
+			$display("lstm1 increment activate ", mainIteration, " height ", heightCount);
 		`endif
 		mainIteration <= mainIteration + 1;
 		if (mainIteration == 50400) begin
@@ -217,7 +218,7 @@ module mkLSTM1(LSTM1Ifc);
 	
 	rule resetMain(mainIncrementEN && mainIteration == 50899);//reset in the last iteration
 		`ifdef BSIM
-			$display("lstm1 increment reset ", mainIteration);
+			$display("lstm1 increment reset ", mainIteration, " height ", heightCount);
 		`endif
 		mainIteration <= 0;
 		spramAddr <= 0;
@@ -238,7 +239,7 @@ module mkLSTM1(LSTM1Ifc);
 		end
 	endrule
 	
-	rule cascadeCalc(calcStage != fetchStage);
+	rule cascadeCalc(calcStageQ.notEmpty);
 		calcStage <= calcStageQ.first;
 		calcStageQ.deq;
 		//calcStage <= fetchStage;
@@ -272,12 +273,13 @@ module mkLSTM1(LSTM1Ifc);
 		
 		//update calc parameters
 		calcMask <= incMask;
-		writeAddr <= bramAddr;
+		writeAddrQ.enq(bramAddr);
+		//writeAddr <= bramAddr;
 	endrule
 	
 	rule calcInput(calcStage == INPUT); //100x4 steps before incrementing 
 		`ifdef BSIM
-			$display("lstm1 input write ", writeAddr);
+			$display("lstm1 input write ", writeAddrQ.first);
 		`endif
 
 		//receive bram x value
@@ -292,6 +294,9 @@ module mkLSTM1(LSTM1Ifc);
 		Int#(8) dataIn = inputReg;
 		//calculate new x value
 		Int#(8) product = quantizedMult(coeff, dataIn);
+		
+		Bit#(9) writeAddr = writeAddrQ.first;
+		writeAddrQ.deq;
 		bram_x.b.put(True, writeAddr, pack(quantizedAdd(aggregate, product)));
 	endrule
 	
@@ -329,7 +334,8 @@ module mkLSTM1(LSTM1Ifc);
 		
 		//update calc parameters
 		calcMask <= incMask;
-		writeAddr <= bramAddr;
+		writeAddrQ.enq(bramAddr);
+		//writeAddr <= bramAddr;
 	endrule
 	
 	rule calcHidden(calcStage == HIDDEN);
@@ -358,6 +364,9 @@ module mkLSTM1(LSTM1Ifc);
 		
 		//calculate new y value
 		Int#(8) product = quantizedMult(coeff, hiddenIn);
+		
+		Bit#(9) writeAddr = writeAddrQ.first;
+		writeAddrQ.deq;
 		bram_x.b.put(True, writeAddr, pack(quantizedAdd(aggregate, product)));
 	endrule
 
@@ -375,7 +384,8 @@ module mkLSTM1(LSTM1Ifc);
 		
 		//update calc parameters
 		calcMask <= incMask;
-		writeAddr <= bramAddr;
+		writeAddrQ.enq(bramAddr);
+		//writeAddr <= bramAddr;
 	endrule
 
 	Reg#(Int#(8)) bias <- mkReg(0);
@@ -384,8 +394,9 @@ module mkLSTM1(LSTM1Ifc);
 	Reg#(Bool) calcBias1 <- mkReg(False); //enables calcBiasZW
 	Reg#(Bool) calcBias2 <- mkReg(False); //enables calcBiasHS
 	
-	Reg#(Bit#(9)) writeAddr1 <- mkReg(0);
-	Reg#(Bit#(9)) writeAddr2 <- mkReg(0);
+	FIFOF#(Bit#(9)) writeAddrBiasQ <- mkSizedBRAMFIFOF(3);
+	//Reg#(Bit#(9)) writeAddr1 <- mkReg(0);
+	//Reg#(Bit#(9)) writeAddr2 <- mkReg(0);
 	
 	rule calcBiasCascade;//follows fetchStage in a cascaded delay 
 		calcBias1 <= (calcStage == BIAS);
@@ -407,7 +418,10 @@ module mkLSTM1(LSTM1Ifc);
 		
 		//calculate x + y
 		bias1 <= quantizedAdd(x, y);
-		writeAddr1 <= writeAddr;
+		Bit#(9) writeAddr = writeAddrQ.first;
+		writeAddrQ.deq;
+		writeAddrBiasQ.enq(writeAddr);
+		//writeAddr1 <= writeAddr;
 	endrule
 
 	Reg#(Int#(8)) bias2 <- mkReg(0);
@@ -415,12 +429,16 @@ module mkLSTM1(LSTM1Ifc);
 	rule calcBiasZW(calcBias1); //
 		// calculate x + y + bias
 		bias2 <= quantizedAdd(bias1, bias);
-		writeAddr2 <= writeAddr1;
+
+		//writeAddr2 <= writeAddr1;
 	endrule
 	
 	rule calcBiasHS(calcBias2);
 		// calculate hard_sigmoid(x + y+ bias)
-		bram_y.b.put(True, writeAddr2, pack(hardSigmoid(bias2)));
+		writeAddrBiasQ.deq;
+		Bit#(9) writeAddr = writeAddrBiasQ.first;
+		bram_y.b.put(True, writeAddr, pack(hardSigmoid(bias2)));
+		//bram_y.b.put(True, writeAddr2, pack(hardSigmoid(bias2)));
 	endrule
 
 	
@@ -428,7 +446,7 @@ module mkLSTM1(LSTM1Ifc);
 		`ifdef BSIM
 			$display("lstm1 activate1 fetch");
 		`endif
-		writeAddr <= bramAddr;
+		writeAddrQ.enq(bramAddr);//writeAddr <= bramAddr;
 		Bit#(9) bramAddr1 = bramAddr*4+1; //F layer
 		Bit#(9) bramAddr2 = bramAddr; //carry_prev
 		bram_y.a.put(False, bramAddr1, ?);//fetch F from bram y
@@ -441,6 +459,8 @@ module mkLSTM1(LSTM1Ifc);
 		`endif
 		Int#(8) c_prev = bramRespA(bram_carry); //retrieve previous carry
 		Int#(8) f = bramRespA(bram_y); //retrieve f
+		Bit#(9) writeAddr = writeAddrQ.first;
+		writeAddrQ.deq;
 		bram_carry.b.put(True, writeAddr, pack(quantizedMult(c_prev,f))); //carry[j] = hard_sigmoid_func(f[j])*carry[j]
 	endrule
 	
@@ -448,7 +468,7 @@ module mkLSTM1(LSTM1Ifc);
 		`ifdef BSIM
 			$display("lstm1 activate2 fetch");
 		`endif
-		writeAddr <= bramAddr;
+		writeAddrQ.enq(bramAddr);//writeAddr <= bramAddr;
 		Bit#(9) bramAddr1 = bramAddr*4; // I layer
 		Bit#(9) bramAddr2 = bramAddr1 + 2; // C layer
 		bram_y.a.put(False, bramAddr1, ?); 
@@ -461,6 +481,8 @@ module mkLSTM1(LSTM1Ifc);
 		`endif
 		Int#(8) i = bramRespA(bram_y); 
 		Int#(8) c = bramRespB(bram_y);
+		Bit#(9) writeAddr = writeAddrQ.first;
+		writeAddrQ.deq;
 		bram_hidden.b.put(True, writeAddr, pack(quantizedMult(i,c))); //hidden[j] = hard_sigmoid_func(i[j])*hard_sigmoid_func(c[j])
 	endrule
 	
@@ -468,7 +490,7 @@ module mkLSTM1(LSTM1Ifc);
 		`ifdef BSIM
 			$display("lstm1 activate3 fetch");
 		`endif
-		writeAddr <= bramAddr;
+		writeAddrQ.enq(bramAddr);//writeAddr <= bramAddr;
 		bram_carry.a.put(False, bramAddr, ?); // Fetch F*c_prev
 		bram_hidden.a.put(False, bramAddr, ?);// Fetch I*C
 	endrule
@@ -479,6 +501,8 @@ module mkLSTM1(LSTM1Ifc);
 		`endif
 		Int#(8) cf = bramRespA(bram_carry);
 		Int#(8) ic = bramRespA(bram_hidden);
+		Bit#(9) writeAddr = writeAddrQ.first;
+		writeAddrQ.deq;
 		bram_carry.b.put(True, writeAddr, pack(quantizedAdd(cf,ic))); //new carry state: carry[j] = carry[j] + hidden[j]
 	endrule
 	
@@ -486,7 +510,7 @@ module mkLSTM1(LSTM1Ifc);
 		`ifdef BSIM
 			$display("lstm1 activate4 fetch");
 		`endif
-		writeAddr <= bramAddr;
+		writeAddrQ.enq(bramAddr);//writeAddr <= bramAddr;
 		bram_carry.a.put(False, bramAddr, ?); //Fetch I*F*C*c_prev
 	endrule
 	
@@ -495,6 +519,8 @@ module mkLSTM1(LSTM1Ifc);
 			$display("lstm1 activate4");
 		`endif
 		Int#(8) c_state = bramRespA(bram_carry);
+		Bit#(9) writeAddr = writeAddrQ.first;
+		writeAddrQ.deq;
 		bram_hidden.b.put(True, writeAddr, pack(hardSigmoid(c_state))); //hidden[j] = hard_sigmoid(carry[j])
 	endrule
 	
@@ -503,7 +529,7 @@ module mkLSTM1(LSTM1Ifc);
 		`ifdef BSIM
 			$display("lstm1 activate5 fetch");
 		`endif
-		writeAddr <= bramAddr; 
+		writeAddrQ.enq(bramAddr);//writeAddr <= bramAddr; 
 		Bit#(9) bramAddr1 = bramAddr; // hard_sigmoid(I*F*C*c_prev)
 		Bit#(9) bramAddr2 = bramAddr*4 + 3; // O layer
 		bram_hidden.a.put(False, bramAddr1, ?); //fetch hard_sigmoid
@@ -517,6 +543,8 @@ module mkLSTM1(LSTM1Ifc);
 		Int#(8) hs = bramRespA(bram_hidden);
 		Int#(8) o = bramRespA(bram_y);
 		let h_state = quantizedMult(hs, o);
+		Bit#(9) writeAddr = writeAddrQ.first;
+		writeAddrQ.deq;
 		bram_hidden.b.put(True, writeAddr, pack(h_state)); //new hidden state: hidden[j] = hidden[j]*o[j];
 		outputQ.enq(h_state);
 		//lstm2.processInput(pack(h_state));
