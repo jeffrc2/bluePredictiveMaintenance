@@ -41,6 +41,7 @@ module mkLSTM1(LSTM1Ifc);
 	//LSTM2Ifc lstm2 <- mkLSTM2; 
 
 	FIFOF#(Int#(8)) inputQ <- mkSizedBRAMFIFOF(10);
+	FIFOF#(Bit#(8)) weightQ <- mkSizedBRAMFIFOF(10);
 	FIFOF#(Int#(8)) outputQ <- mkSizedBRAMFIFOF(2);
 	
 	Int#(16) invscale = 42;
@@ -104,7 +105,8 @@ module mkLSTM1(LSTM1Ifc);
 	//endrule
 	
 	Reg#(Bit#(16)) mainIteration <- mkReg(0);//Range 0-50399 for input/hidden/bias, 50400-50899 for activate1-6
-	Reg#(Bit#(15)) spramAddr <- mkReg(0);//Range 0-25199
+	Reg#(Bit#(15)) spramAddrR <- mkReg(0);//Range 0-25199
+	Reg#(Bit#(15)) spramAddrW <- mkReg(0);//Range 0-25199
 	
 	Reg#(Bit#(9)) bramAddr <- mkReg(0);//Range 0-399
 	
@@ -128,6 +130,7 @@ module mkLSTM1(LSTM1Ifc);
 	FIFOF#(Bit#(9)) writeAddrQ <- mkSizedBRAMFIFOF(3);
 	//Reg#(Bit#(9)) writeAddr <- mkReg(0);
 
+    Reg#(Bit#(4)) stage <- mkReg(0);
 	Reg#(Stage) fetchStage <- mkReg(INPUT);
 	FIFOF#(Stage) fetchStageQ <- mkSizedBRAMFIFOF(3);
 	FIFOF#(Stage) calcStageQ <- mkSizedBRAMFIFOF(3);
@@ -146,8 +149,23 @@ module mkLSTM1(LSTM1Ifc);
 			calcStageQ.enq(newStage);
 		endaction
 	endfunction
-		
-	rule incrementMain(mainIncrementEN && mainIteration < 50400);
+
+	FIFOF#(Int#(8)) inputQ2 <- mkSizedBRAMFIFOF(10);
+    rule getInput1(!mainIncrementEN);
+	     let in = inputQ.first;	
+         inputQ.deq;
+         inputQ2.enq(in);
+         mainIncrementEN <= True;
+         stage <= 1;
+    endrule
+
+    rule getInput2(mainIncrementEN);
+	     let in = inputQ.first;	
+         inputQ.deq;
+         inputQ2.enq(in);
+    endrule
+
+	rule incrementMain(mainIncrementEN && mainIteration < 50400 && stage == 1);
 		`ifdef BSIM
 			$display("lstm1 increment main ", mainIteration, " height ", heightCount);
 		`endif
@@ -184,12 +202,12 @@ module mkLSTM1(LSTM1Ifc);
 			end
 			LOWER: begin
 				incMask <= UPPER;
-				spramAddr <= spramAddr + 1;
+				spramAddrR <= spramAddrR + 1;
 			end
 		endcase
 	endrule
 	
-	rule incrementActivate(mainIncrementEN && mainIteration >= 50400 && mainIteration < 50899);
+	rule incrementActivate(mainIncrementEN && mainIteration >= 50400 && mainIteration < 50899 && stage == 1);
 		`ifdef BSIM
 			$display("lstm1 increment activate ", mainIteration, " height ", heightCount);
 		`endif
@@ -209,6 +227,9 @@ module mkLSTM1(LSTM1Ifc);
 		else if (mainIteration == 50800) begin
 			setStage(ACTIVATE5);
 		end
+		else if (mainIteration == 50898) begin
+			stage <= 2;
+		end
 		if (bramAddr < 99) bramAddr <= bramAddr + 1;
 		else begin
 			bramAddr <= 0;
@@ -216,12 +237,12 @@ module mkLSTM1(LSTM1Ifc);
 		end
 	endrule
 	
-	rule resetMain(mainIncrementEN && mainIteration == 50899);//reset in the last iteration
+	rule resetMain(mainIncrementEN && mainIteration == 50899 && stage == 2);//reset in the last iteration
 		`ifdef BSIM
 			$display("lstm1 increment reset ", mainIteration, " height ", heightCount);
 		`endif
 		mainIteration <= 0;
-		spramAddr <= 0;
+		spramAddrR <= 0;
 		bramAddr <= 0;
 		unitCount <= 0;
 		readX <= False;
@@ -233,6 +254,7 @@ module mkLSTM1(LSTM1Ifc);
 		end
 		else begin
 			mainIncrementEN <= False;
+            stage <= 0;
 			fetchStage <= INIT;
 			heightCount <= 0;
 
@@ -247,22 +269,22 @@ module mkLSTM1(LSTM1Ifc);
 	
 	Reg#(Int#(8)) inputReg <- mkReg(0);
 	
-	rule fetchInput(fetchStage == INPUT); //input calculation requests
+	rule fetchInput(fetchStage == INPUT && stage == 1); //input calculation requests
 		// dequeue an input every 200 iterations (25 dequeues)
 		`ifdef BSIM
-			$display("lstm1 input fetch spram ", spramAddr, "bram ", bramAddr);
+			$display("lstm1 input fetch spram ", spramAddrR, "bram ", bramAddr);
 		`endif
 		
 		//fetch spram kernel value
-		spram0.req(spramAddr[13:0], ?, False, ?);
+		spram0.req(spramAddrR[13:0], ?, False, ?);
 		
-		inputReg <= inputQ.first;
+		inputReg <= inputQ2.first;
 		//fetch a new input at the beginning of each unit after the first, and enable reading BRAM X
 		if (bramAddr == 399) begin //dequeue input
-			if (inputQ.notEmpty) begin
-				inputQ.deq;
+			if (inputQ2.notEmpty) begin
+				inputQ2.deq;
 			end else begin
-				$display("inputQ is currently empty ", inputCount);
+				$display("inputQ2 is currently empty ", inputCount);
 				$finish(0);
 			end
 		end
@@ -277,7 +299,7 @@ module mkLSTM1(LSTM1Ifc);
 		//writeAddr <= bramAddr;
 	endrule
 	
-	rule calcInput(calcStage == INPUT); //100x4 steps before incrementing 
+	rule calcInput(calcStage == INPUT && stage == 1); //100x4 steps before incrementing 
 		`ifdef BSIM
 			$display("lstm1 input write ", writeAddrQ.first);
 		`endif
@@ -302,19 +324,19 @@ module mkLSTM1(LSTM1Ifc);
 	
 	Reg#(Bit#(1)) spramTop <- mkReg(0);
 	
-	rule fetchHidden(fetchStage == HIDDEN); //input calculation requests
+	rule fetchHidden(fetchStage == HIDDEN && calcStage == HIDDEN && stage == 1); //input calculation requests
 		// dequeue an input every 400 iterations (25 dequeues)
 		`ifdef BSIM
 			$display("lstm1 hidden fetch");
 		`endif
 		
 		// fetch spram recurrent value
-		case (spramAddr[14]) matches
-			0: spram0.req(spramAddr[13:0], ?, False, ?);
-			1: spram1.req(spramAddr[13:0], ?, False, ?);
+		case (spramAddrR[14]) matches
+			0: spram0.req(spramAddrR[13:0], ?, False, ?);
+			1: spram1.req(spramAddrR[13:0], ?, False, ?);
 		endcase
 		
-		spramTop <= spramAddr[14];
+		spramTop <= spramAddrR[14];
 		
 		//fetch bram hidden and y value after the first hidden unit
 		if (heightCount > 0) begin
@@ -338,7 +360,7 @@ module mkLSTM1(LSTM1Ifc);
 		//writeAddr <= bramAddr;
 	endrule
 	
-	rule calcHidden(calcStage == HIDDEN);
+	rule calcHidden(calcStage == HIDDEN && stage == 1);
 		`ifdef BSIM
 			$display("lstm1 hidden");
 		`endif
@@ -371,7 +393,7 @@ module mkLSTM1(LSTM1Ifc);
 	endrule
 
 	
-	rule fetchBias(fetchStage == BIAS); //input calculation requests
+	rule fetchBias(fetchStage == BIAS && calcStage == BIAS && stage == 1); //input calculation requests
 		`ifdef BSIM
 			$display("lstm1 bias fetch");
 		`endif
@@ -380,7 +402,7 @@ module mkLSTM1(LSTM1Ifc);
 		//fetch bram y value
 		bram_y.a.put(False, bramAddr, ?);
 		//fetch spram value
-		spram1.req(spramAddr[13:0], ?, False, ?);
+		spram1.req(spramAddrR[13:0], ?, False, ?);
 		
 		//update calc parameters
 		calcMask <= incMask;
@@ -403,7 +425,7 @@ module mkLSTM1(LSTM1Ifc);
 		calcBias2 <= calcBias1;
 	endrule
 
-	rule calcBiasXY(calcStage == BIAS); 
+	rule calcBiasXY(calcStage == BIAS && stage == 1); 
 		`ifdef BSIM
 			$display("lstm1 bias");
 		`endif
@@ -464,7 +486,7 @@ module mkLSTM1(LSTM1Ifc);
 		bram_carry.b.put(True, writeAddr, pack(quantizedMult(c_prev,f))); //carry[j] = hard_sigmoid_func(f[j])*carry[j]
 	endrule
 	
-	rule fetchActivate2(fetchStage == ACTIVATE2); //bias 3 calculation requests
+	rule fetchActivate2(fetchStage == ACTIVATE2 && !calcBias2); //bias 3 calculation requests
 		`ifdef BSIM
 			$display("lstm1 activate2 fetch");
 		`endif
@@ -550,19 +572,55 @@ module mkLSTM1(LSTM1Ifc);
 		//lstm2.processInput(pack(h_state));
 		//lstm2.start;
 	endrule 
-	
-	method Action processInput(Bit#(8) in);
+
+    rule handle_weight(stage == 0);
+        let weight = weightQ.first;
+        weightQ.deq;	
+		Bit#(4) bytemask = 4'b1111;
+		Bit#(16) maskeddata = 0;
+		case (incMask) matches
+			UPPER: begin
+				incMask <= LOWER;
+				bytemask = 4'b1100;
+				maskeddata[15:8] = weight;
+			end
+			LOWER: begin
+				incMask <= UPPER;
+				bytemask = 4'b0011;
+				if (spramAddrW < 25199) begin
+                    spramAddrW <= spramAddrW + 1;
+				end else begin
+                    spramAddrW <= 0;
+                    stage <= 1; 
+                end
+				maskeddata[7:0] = weight;
+			end
+		endcase
+		case (spramAddrW[14]) matches
+				0: spram0.req(spramAddrW[13:0], maskeddata, True, bytemask);
+				1: spram1.req(spramAddrW[13:0], maskeddata, True, bytemask);
+		endcase
+    endrule
+
+	method Action processInput(Bit#(8) in) if (stage == 0);
 		`ifdef BSIM
 			$display("processing LSTM1 input", inputCount);
 		`endif
+        /*
 		if (mainIncrementEN == False) begin
 			mainIncrementEN <= True;
 		end
+        */
 		inputCount <= inputCount + 1;
 		inputQ.enq(unpack(in));
 	endmethod
 	
 	method Action processWeight(Bit#(8) weight);
+        weightQ.enq(weight);
+    endmethod
+
+    /*
+	method Action processWeight(Bit#(8) weight) if (stage == 0);
 		`ifdef BSIM
 			$display("processing LSTM1 weight");
 		`endif
@@ -587,6 +645,7 @@ module mkLSTM1(LSTM1Ifc);
 				1: spram1.req(spramAddr[13:0], maskeddata, True, bytemask);
 		endcase
 	endmethod
+    */
 	
 	method Action processLSTM2Weight(Bit#(8) weight);
 		//lstm2.processWeight(weight);
