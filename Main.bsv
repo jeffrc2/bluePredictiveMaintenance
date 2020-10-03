@@ -3,7 +3,6 @@ import BRAM::*;
 import BRAMFIFO::*;
 
 import LSTM1::*;
-import Spram::*;
 
 typedef enum {LSTM1, LSTM2, DENSE, INPUT, FIN} LoadStage deriving (Bits,Eq);
 
@@ -27,12 +26,11 @@ module mkMain(MainIfc);
 	
 	rule count;
 		counter <= counter + 1;
-		`ifdef BSIM
-			//$display("top counter", counter);
-		`endif
+		$display("top counter", counter);
+
 	endrule
 	
-	rule relayUart(lstm1.outputReady);
+	rule relayUart;
 		Int#(8) out <- lstm1.getOutput;
 		uartQ.enq(pack(out));
 	endrule
@@ -42,7 +40,8 @@ module mkMain(MainIfc);
 	
 	
 	//Method transfers data to LSTM1 to be processed as weights until all weights have been processed, then subsequent data is transferred to be processed as input
-	method Action uartIn(Bit#(8) data) if (lstm1.inputReady == True);
+	method Action uartIn(Bit#(8) data);
+		$display("uartIn running");
 		case (loadStage) matches
 			LSTM1: begin
 				lstm1.processWeight(data);
@@ -50,6 +49,7 @@ module mkMain(MainIfc);
 				else begin
 					weight_counter <= 0;
 					loadStage <= LSTM2;
+					$display("LSTM1 weights loaded.");
 				end
 			end
 			LSTM2: begin
@@ -58,6 +58,7 @@ module mkMain(MainIfc);
 				else begin
 					weight_counter <= 0;
 					loadStage <= DENSE;
+					$display("LSTM2 weights loaded.");
 				end
 			end
 			DENSE: begin
@@ -66,8 +67,10 @@ module mkMain(MainIfc);
 				else begin
 					weight_counter <= 0;
 					loadStage <= INPUT;
+					$display("Dense weights loaded.");
 				end
 			end
+			/*
 			INPUT: begin
 				lstm1.processInput(data);
 				if (weight_counter < 1249) weight_counter <= weight_counter + 1;
@@ -75,16 +78,16 @@ module mkMain(MainIfc);
 					weight_counter <= 0;
 					loadStage <= FIN;
 				end
+				
 			end
+			*/
 		endcase
 	endmethod
 	
 	method ActionValue#(Bit#(8)) uartOut;
 		uartQ.deq;
-		`ifdef BSIM
-				$display("output given");
-				$finish(0);
-		`endif
+		$display("output given");
+		$finish(0);
 		return uartQ.first;
 		
 	endmethod
